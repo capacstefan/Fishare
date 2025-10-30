@@ -1,5 +1,5 @@
 import json, threading, time, logging
-from .netutils import make_multicast_socket
+from .netutils import make_multicast_socket, get_local_ip
 from core.state import Device, AppStatus
 
 LOG = logging.getLogger(__name__)
@@ -30,6 +30,14 @@ class Scanner:
                 payload = json.loads(data.decode('utf-8'))
                 if payload.get('type') != 'fishare_adv':
                     continue
+
+                local_ip = get_local_ip()
+                adv_host = payload.get("host") or addr[0]
+                adv_port = int(payload.get("port",0))
+
+                if adv_host == local_ip and adv_port == self.state.cfg.listen_port:
+                        continue
+                
                 dev = Device(
                     device_id=f"{addr[0]}:{payload['port']}",
                     name=payload.get('name', 'Unknown'),

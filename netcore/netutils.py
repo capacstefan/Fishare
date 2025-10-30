@@ -23,3 +23,11 @@ def make_multicast_sender() -> socket.socket:
     ttl = struct.pack("b", 2)
     s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
     return s
+
+def get_local_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"

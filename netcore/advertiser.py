@@ -2,7 +2,7 @@ import json
 import threading
 import time
 import logging
-from .netutils import make_multicast_sender, MCAST_GRP
+from .netutils import make_multicast_sender, MCAST_GRP, get_local_ip
 from core.state import AppStatus
 
 LOG = logging.getLogger(__name__)
@@ -33,6 +33,7 @@ class Advertiser:
             payload = {
                 "type": "fishare_adv",
                 "name": cfg.device_name,
+                "host": get_local_ip(),
                 "port": cfg.listen_port,
                 "status": self.state.status.value,
             }
