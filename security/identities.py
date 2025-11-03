@@ -1,9 +1,8 @@
 import os
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
-from settings.storage import CFG_DIR
+from settings.paths import KEY_FILE, DATA_DIR
 
-KEY_PATH = os.path.join(CFG_DIR, "id_ed25519.pem")
 
 
 class Identity:
@@ -14,9 +13,9 @@ class Identity:
         self._pub = None
 
     def load_or_create(self):
-        os.makedirs(CFG_DIR, exist_ok=True)
-        if os.path.exists(KEY_PATH):
-            with open(KEY_PATH, "rb") as f:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        if os.path.exists(KEY_FILE):
+            with open(KEY_FILE, "rb") as f:
                 self._priv = serialization.load_pem_private_key(f.read(), password=None)
         else:
             self._priv = ed25519.Ed25519PrivateKey.generate()
@@ -25,7 +24,7 @@ class Identity:
                 format=serialization.PrivateFormat.PKCS8,
                 encryption_algorithm=serialization.NoEncryption(),
             )
-            with open(KEY_PATH, "wb") as f:
+            with open(KEY_FILE, "wb") as f:
                 f.write(pem)
         self._pub = self._priv.public_key()
 

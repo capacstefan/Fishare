@@ -1,19 +1,16 @@
 import json
 import os
 from dataclasses import asdict
-
-CFG_DIR = os.path.join(os.path.expanduser("~"), ".fishare")
-CFG_PATH = os.path.join(CFG_DIR, "config.json")
-
+from settings.paths import CONFIG_FILE, DATA_DIR
 
 class Storage:
     @staticmethod
     def load(defaults: dict) -> dict:
-        os.makedirs(CFG_DIR, exist_ok=True)
-        if not os.path.exists(CFG_PATH):
+        os.makedirs(DATA_DIR, exist_ok=True)
+        if not os.path.exists(CONFIG_FILE):
             return defaults
         try:
-            with open(CFG_PATH, "r", encoding="utf-8") as f:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 return {**defaults, **data}
         except Exception:
@@ -21,6 +18,6 @@ class Storage:
 
     @staticmethod
     def save(obj) -> None:
-        os.makedirs(CFG_DIR, exist_ok=True)
-        with open(CFG_PATH, "w", encoding="utf-8") as f:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(asdict(obj), f, indent=2)
