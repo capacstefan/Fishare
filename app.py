@@ -1,9 +1,7 @@
 import sys
-from utils.logging_config import setup_logging
-from settings.config import Config
+from config import setup_logging, Config
 from core.state import AppState
-from netcore.advertiser import Advertiser
-from netcore.scanner import Scanner
+from network import Advertiser, Scanner
 from ui.main_window import FIshareApp
 
 def main():
@@ -19,6 +17,11 @@ def main():
     app = FIshareApp(state, advertiser)
     app.mainloop()
 
+    # ensure background services stop cleanly
+    try:
+        app.transfer.stop()
+    except Exception:
+        pass
     advertiser.stop()
     scanner.stop()
 

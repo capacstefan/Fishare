@@ -34,6 +34,8 @@ class AppState:
 
     def upsert_device(self, dev: Device):
         with self._lock:
+            # update last_seen and replace or insert
+            dev.last_seen = time.time()
             self.devices[dev.device_id] = dev
 
     def update_progress(self, device_id: str, file: str, ratio: float):
@@ -43,3 +45,9 @@ class AppState:
     def get_progress(self, device_id: str):
         with self._lock:
             return self.progress.get(device_id, {})
+
+    def prune_devices(self, ttl_seconds: float = 6.0):
+        """Remove devices not seen within ttl_seconds."""
+        with self._lock:
+            now = time.time()
+            self.devices = {k: v for k, v in self.devices.items() if now - v.last_seen < ttl_seconds}
