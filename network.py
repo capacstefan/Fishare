@@ -7,7 +7,7 @@ import time
 import os
 from typing import List
 
-from core.state import Device, AppStatus
+from state import Device, AppStatus
 from security import key_agree, Identity
 
 

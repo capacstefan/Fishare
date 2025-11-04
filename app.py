@@ -1,8 +1,8 @@
 import sys
 from config import setup_logging, Config
-from core.state import AppState
+from state import AppState
 from network import Advertiser, Scanner
-from ui.main_window import FIshareApp
+from main_window import FIshareApp
 
 def main():
     setup_logging()

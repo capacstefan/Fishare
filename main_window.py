@@ -1,6 +1,6 @@
 import customtkinter as ctk
 from tkinter import messagebox, filedialog
-from core.state import AppStatus
+from state import AppStatus
 from network import TransferService
 import threading
 import os
