@@ -10,7 +10,6 @@ from typing import List
 from state import Device, AppStatus
 from security import key_agree, Identity
 
-
 LOG = logging.getLogger(__name__)
 
 # Multicast group for discovery
@@ -172,7 +171,7 @@ class TransferService:
 
     def __init__(self, state, ui_root=None):
         self.state = state
-        self.ui_root = ui_root
+        self.ui_root = ui_root  # referință doar pentru context, NU o folosești în thread-urile de rețea
         self.identity = Identity()
         self.identity.load_or_create()
         self._stop = threading.Event()
@@ -199,20 +198,6 @@ class TransferService:
 
             threading.Thread(target=self._handle_peer, args=(conn, addr), daemon=True).start()
 
-    def _ask_permission(self, addr, files_count, total_bytes) -> bool:
-        """
-        Cheamă UI-ul (PyQt) dacă e disponibil. Dacă suntem în BUSY, respingem automat.
-        """
-        # Busy => respinge automat (cerința 3/4)
-        if self.state.status == AppStatus.BUSY:
-            return False
-        try:
-            if self.ui_root and hasattr(self.ui_root, "ask_incoming_confirmation"):
-                return bool(self.ui_root.ask_incoming_confirmation(addr[0], files_count, total_bytes))
-        except Exception:
-            pass
-        return True  # fallback simplu
-
     def _handle_peer(self, conn, addr):
         with conn:
             try:
@@ -223,14 +208,15 @@ class TransferService:
                     LOG.warning(f"Unknown request type from {addr}")
                     return
 
-                files = req["files"]
+                files = req.get("files", [])
                 total = int(req.get("total", 0))
 
-                accepted = self._ask_permission(addr, len(files), total)
+                # VARIANTA D: fără dialog în thread. Busy => refuz automat; altfel acceptăm.
+                accepted = (self.state.status != AppStatus.BUSY)
 
                 Proto.send_json(conn, {"accept": bool(accepted)}, aead)
                 if not accepted:
-                    return
+                    return  # refuzat (UI va afișa mesaj pe sender)
 
                 # Receive each file, tracking aggregated progress
                 received_total = 0
@@ -253,8 +239,7 @@ class TransferService:
                             received_total += len(data)
                             remaining -= len(data)
                             if total > 0:
-                                # pe receiver nu avem device-ul sender înregistrat neapărat;
-                                # nu forțăm UI pentru IP/port care nu există în listă
+                                # Progresul pe receiver se ține per IP (addr[0]); UI îl va filtra dacă nu are device-ul în listă
                                 self.state.update_progress(addr[0], received_total / total)
 
                     LOG.info(f"Received {fname}")
@@ -270,12 +255,12 @@ class TransferService:
     # ---------------------- SENDER ----------------------
 
     def send_to(self, device, files: List[str]) -> bool:
-        # Dacă device-ul este BUSY -> refuz instant (cerința 3)
+        # Dacă device-ul este BUSY -> refuz instant și anunțăm UI prin buffer (varianta D)
         if getattr(device, "status", AppStatus.AVAILABLE) == AppStatus.BUSY:
             LOG.info(f"{device.name} este BUSY - refuz automat.")
+            # adaugă o notificare pentru UI (va fi afișată în refresh_ui)
             try:
-                if self.ui_root and hasattr(self.ui_root, "notify_rejected"):
-                    self.ui_root.notify_rejected(device.name)
+                self.state.rejections.append(device.name)
             except Exception:
                 pass
             return False
@@ -301,9 +286,9 @@ class TransferService:
                     resp = Proto.recv_json(sock, aead)
                     if not resp.get("accept"):
                         LOG.info(f"{device.name} a refuzat transferul.")
+                        # UI notification prin buffer (UI o va afișa în refresh_ui)
                         try:
-                            if self.ui_root and hasattr(self.ui_root, "notify_rejected"):
-                                self.ui_root.notify_rejected(device.name)
+                            self.state.rejections.append(device.name)
                         except Exception:
                             pass
                         return False
@@ -327,7 +312,6 @@ class TransferService:
 
                     LOG.info(f"Transfer to {device.name} complete.")
                     self.state.update_progress(device.device_id, 1.0)
-                    # curăță progresul după succes
                     self.state.clear_progress(device.device_id)
                     return True
 
@@ -336,6 +320,5 @@ class TransferService:
                 time.sleep(2)
 
         LOG.error(f"Transfer failed after {self.MAX_RETRIES} attempts to {device.name}")
-        # curăță progresul la eșec
         self.state.clear_progress(device.device_id)
         return False

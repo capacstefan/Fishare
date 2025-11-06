@@ -28,8 +28,8 @@ class AppState:
         self.devices: Dict[str, Device] = {}
         self.selected_device_ids: List[str] = []
         self.selected_files: List[str] = []
-        # Un singur progress per device: 0..1
         self.progress: Dict[str, float] = {}
+        self.rejections: List[str] = []  # lista care va fi prelucrată în UI
 
     def set_status(self, status: AppStatus):
         with self._lock:
@@ -40,7 +40,6 @@ class AppState:
             dev.last_seen = time.time()
             self.devices[dev.device_id] = dev
 
-    # ----- Progress simplificat (per device) -----
     def update_progress(self, device_id: str, ratio: float):
         with self._lock:
             self.progress[device_id] = max(0.0, min(1.0, float(ratio)))
@@ -56,9 +55,6 @@ class AppState:
     def prune_devices(self, ttl_seconds: float = 6.0):
         with self._lock:
             now = time.time()
-            # păstrează doar device-urile recente
             self.devices = {k: v for k, v in self.devices.items() if now - v.last_seen < ttl_seconds}
-            # curăță progres pentru device-uri dispărute
             self.progress = {k: v for k, v in self.progress.items() if k in self.devices}
-            # curăță selecțiile invalide
             self.selected_device_ids = [d for d in self.selected_device_ids if d in self.devices]

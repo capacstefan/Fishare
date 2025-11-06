@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from typing import Dict
-from PyQt6.QtCore import Qt, QTimer, pyqtSlot, pyqtSignal, QEvent
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot, QEvent
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QApplication, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
@@ -18,8 +18,6 @@ STATUS_DOT = {AppStatus.AVAILABLE: "🟢", AppStatus.BUSY: "🔴"}
 
 
 class StatusButtonToggle(QWidget):
-    toggled = pyqtSignal(AppStatus)
-
     def __init__(self, current_status: AppStatus, parent=None):
         super().__init__(parent)
         self._status = current_status
@@ -51,7 +49,7 @@ class StatusButtonToggle(QWidget):
         self.btn_busy.setChecked(status == AppStatus.BUSY)
         self._apply_styles()
         if not init:
-            self.toggled.emit(status)
+            self.parent().on_status_toggled(status)
 
     def _apply_styles(self):
         self.btn_available.setStyleSheet(
@@ -87,19 +85,21 @@ class StatusButtonToggle(QWidget):
         }"""
 
 
-# -------- Progress UI simplificat (un bar per device) -------- #
 class DeviceProgressRow(QFrame):
     def __init__(self, device_id: str, device_name: str, parent=None):
         super().__init__(parent)
         self.device_id = device_id
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
+
         self.lbl = QLabel(f"{device_id}  {device_name}")
         self.bar = QProgressBar()
         self.bar.setMinimum(0)
         self.bar.setMaximum(100)
+
         layout.addWidget(self.lbl)
         layout.addWidget(self.bar)
+
         self.setStyleSheet("""
         QFrame { background: #0f1216; border: 1px solid #222831; border-radius: 12px; }
         QLabel { color: #dfe3e8; font-weight: 600; }
@@ -127,9 +127,7 @@ class ProgressPanel(QWidget):
         self.inner_layout.addStretch()
 
     def update(self, state):
-        # adaugă/actualizează
         for dev_id, ratio in list(state.progress.items()):
-            # dacă device-ul nu mai există, nu-l afișăm (evită KeyError)
             if dev_id not in state.devices:
                 continue
             if dev_id not in self.rows:
@@ -138,11 +136,11 @@ class ProgressPanel(QWidget):
                 self.inner_layout.insertWidget(self.inner_layout.count() - 1, row)
             self.rows[dev_id].set_ratio(ratio)
 
-        # șterge automat barele pentru device-urile care au ajuns la 100% sau au dispărut din progress
         to_remove = []
         for dev_id, row in list(self.rows.items()):
             if dev_id not in state.progress or state.get_progress(dev_id) >= 0.999:
                 to_remove.append(dev_id)
+
         for dev_id in to_remove:
             row = self.rows.pop(dev_id, None)
             if row:
@@ -150,11 +148,12 @@ class ProgressPanel(QWidget):
                 row.deleteLater()
 
 
-# -------- Fereastra Principală -------- #
 class FIshareQtApp(QMainWindow):
     def __init__(self, state, advertiser, scanner):
         super().__init__()
         self.app_state = state
+        self.advertiser = advertiser
+        self.scanner = scanner
         self.transfer = TransferService(state, self)
 
         self.setWindowTitle("FIshare")
@@ -181,9 +180,9 @@ class FIshareQtApp(QMainWindow):
         self.name_edit.textEdited.connect(self.on_name_changed)
         layout.addWidget(self.name_edit)
         layout.addWidget(QLabel("Status"))
-        self.status_toggle = StatusButtonToggle(self.app_state.status)
-        self.status_toggle.toggled.connect(self.on_status_toggled)
+        self.status_toggle = StatusButtonToggle(self.app_state.status, self)
         layout.addWidget(self.status_toggle)
+
         btn = QPushButton("Folder")
         btn.clicked.connect(self.pick_download_dir)
         layout.addWidget(btn)
@@ -206,10 +205,10 @@ class FIshareQtApp(QMainWindow):
         right.addWidget(QLabel("Fișiere"))
         self.files_list = QListWidget()
         right.addWidget(self.files_list)
+
         btn = QPushButton("Adaugă fișiere")
         btn.clicked.connect(self.pick_files)
         right.addWidget(btn)
-
         right.addWidget(QLabel("Progres"))
         self.progress_panel = ProgressPanel()
         right.addWidget(self.progress_panel)
@@ -230,25 +229,6 @@ class FIshareQtApp(QMainWindow):
 
     def _apply_style(self):
         self.setStyleSheet("QMainWindow { background: #0b0e12; color: #e6e9ee; }")
-
-    # --------- Hooks pentru dialoguri Accept/Reject și refuz ---------
-    def ask_incoming_confirmation(self, host: str, files_count: int, total_bytes: int) -> bool:
-        # Busy => respinge automat
-        if self.app_state.status == AppStatus.BUSY:
-            return False
-        kb = max(1, int(round(total_bytes / 1024)))
-        reply = QMessageBox.question(
-            self,
-            "Cerere transfer",
-            f"Device {host} vrea să trimită {files_count} fișiere ({kb} KB).\nAccepți?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        return reply == QMessageBox.StandardButton.Yes
-
-    def notify_rejected(self, device_name: str):
-        QMessageBox.warning(self, "Transfer refuzat", f"Destinatarul '{device_name}' a refuzat transferul.")
-
-    # Logic -------------------------------------------------------------
 
     @pyqtSlot(AppStatus)
     def on_status_toggled(self, status):
@@ -302,16 +282,21 @@ class FIshareQtApp(QMainWindow):
         threading.Thread(target=self._do_send, daemon=True).start()
 
     def _do_send(self):
-        ok = sum(self.transfer.send_to(self.app_state.devices[dev_id], self.app_state.selected_files)
-                 for dev_id in list(self.app_state.selected_device_ids)
-                 if dev_id in self.app_state.devices)
+        for dev_id in list(self.app_state.selected_device_ids):
+            if dev_id in self.app_state.devices:
+                self.transfer.send_to(self.app_state.devices[dev_id], self.app_state.selected_files)
+
         QApplication.instance().postEvent(self, _InvokeEvent(
-            lambda: QMessageBox.information(self, "Transfer", f"Trimis la {ok} dispozitive")
+            lambda: self.send_btn.setEnabled(True)
         ))
-        self.send_btn.setEnabled(True)
 
     @pyqtSlot()
     def refresh_ui(self):
+        if self.app_state.rejections:
+            for dev_name in self.app_state.rejections:
+                QMessageBox.warning(self, "Transfer refuzat", f"Destinatarul '{dev_name}' a refuzat transferul.")
+            self.app_state.rejections.clear()
+
         self.refresh_lists()
         self.progress_panel.update(self.app_state)
 
@@ -329,9 +314,19 @@ class FIshareQtApp(QMainWindow):
         for file in self.app_state.selected_files:
             self.files_list.addItem(QListWidgetItem(file))
 
+    def event(self, event):
+        if isinstance(event, _InvokeEvent):
+            event.performAction()
+            return True
+        return super().event(event)
+
 
 class _InvokeEvent(QEvent):
     _TYPE = QEvent.Type(QEvent.registerEventType())
+
     def __init__(self, callback):
         super().__init__(self._TYPE)
         self.callback = callback
+
+    def performAction(self):
+        self.callback()

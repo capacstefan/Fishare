@@ -5,7 +5,6 @@ from logging.handlers import RotatingFileHandler
 import json
 
 
-# Paths and files
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(APP_ROOT, "Data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -18,19 +17,17 @@ KEY_FILE = os.path.join(DATA_DIR, "id_ed25519.pem")
 class Storage:
     @staticmethod
     def load(defaults: dict) -> dict:
-        os.makedirs(DATA_DIR, exist_ok=True)
         if not os.path.exists(CONFIG_FILE):
             return defaults
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                data = json.loads(f)
                 return {**defaults, **data}
         except Exception:
             return defaults
 
     @staticmethod
     def save(obj) -> None:
-        os.makedirs(DATA_DIR, exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(asdict(obj), f, indent=2)
 
@@ -38,7 +35,6 @@ class Storage:
 @dataclass
 class Config:
     device_name: str = os.getenv("COMPUTERNAME", "FIshare")[:32]
-    # implicit în: Downloads\FIshare (director sigur, cu permisiuni)
     download_dir: str = os.path.join(os.path.expanduser("~"), "Downloads", "FIshare")
     allow_incoming: bool = True
     listen_port: int = 49222
@@ -47,7 +43,6 @@ class Config:
     @staticmethod
     def load():
         cfg = Config(**Storage.load(Config().__dict__))
-        # asigură existența directorului implicit
         try:
             os.makedirs(cfg.download_dir, exist_ok=True)
         except Exception:
@@ -59,7 +54,6 @@ class Config:
 
 
 def setup_logging():
-    os.makedirs(DATA_DIR, exist_ok=True)
     fmt = logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s")
 
     root = logging.getLogger()
@@ -67,11 +61,9 @@ def setup_logging():
 
     ch = logging.StreamHandler()
     ch.setFormatter(fmt)
-
     fh = RotatingFileHandler(LOG_FILE, maxBytes=5_000_000, backupCount=5, encoding="utf-8")
     fh.setFormatter(fmt)
 
-    # Evită dublarea handlerelor
     if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):
         root.addHandler(ch)
         root.addHandler(fh)
