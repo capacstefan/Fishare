@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from typing import Dict
-from PyQt6.QtCore import Qt, QTimer, pyqtSlot, QEvent
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot, QEvent, pyqtSignal
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QApplication, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
@@ -18,6 +18,8 @@ STATUS_DOT = {AppStatus.AVAILABLE: "🟢", AppStatus.BUSY: "🔴"}
 
 
 class StatusButtonToggle(QWidget):
+    status_changed = pyqtSignal(AppStatus)
+
     def __init__(self, current_status: AppStatus, parent=None):
         super().__init__(parent)
         self._status = current_status
@@ -49,7 +51,7 @@ class StatusButtonToggle(QWidget):
         self.btn_busy.setChecked(status == AppStatus.BUSY)
         self._apply_styles()
         if not init:
-            self.parent().on_status_toggled(status)
+            self.status_changed.emit(status)
 
     def _apply_styles(self):
         self.btn_available.setStyleSheet(
@@ -181,6 +183,7 @@ class FIshareQtApp(QMainWindow):
         layout.addWidget(self.name_edit)
         layout.addWidget(QLabel("Status"))
         self.status_toggle = StatusButtonToggle(self.app_state.status, self)
+        self.status_toggle.status_changed.connect(self.on_status_toggled)
         layout.addWidget(self.status_toggle)
 
         btn = QPushButton("Folder")
