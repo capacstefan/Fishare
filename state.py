@@ -50,4 +50,8 @@ class AppState:
     def prune_devices(self, ttl_seconds: float = 6.0):
         with self._lock:
             now = time.time()
+            existing_ids = set(self.devices.keys())
             self.devices = {k: v for k, v in self.devices.items() if now - v.last_seen < ttl_seconds}
+
+            # Optional: remove progress for pruned devices
+            self.progress = {k: v for k, v in self.progress.items() if k in self.devices}

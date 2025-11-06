@@ -161,6 +161,8 @@ class ProgressPanel(QWidget):
 
     def update(self, state):
         for dev_id, files in state.progress.items():
+            if dev_id not in state.devices:
+                continue  # Skip orphan progress entries
             if dev_id not in self.rows:
                 row = DeviceRowWidget(dev_id, state.devices[dev_id].name)
                 self.rows[dev_id] = row
@@ -308,7 +310,8 @@ class FIshareQtApp(QMainWindow):
 
         self.selected_list.clear()
         for dev_id in self.app_state.selected_device_ids:
-            self.selected_list.addItem(QListWidgetItem(f"{dev_id} {self.app_state.devices[dev_id].name}"))
+            if dev_id in self.app_state.devices:  # Safe guard
+                self.selected_list.addItem(QListWidgetItem(f"{dev_id} {self.app_state.devices[dev_id].name}"))
 
         self.files_list.clear()
         for file in self.app_state.selected_files:
