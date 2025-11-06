@@ -38,14 +38,21 @@ class Storage:
 @dataclass
 class Config:
     device_name: str = os.getenv("COMPUTERNAME", "FIshare")[:32]
-    download_dir: str = os.path.join(os.path.expanduser("~"), "Downloads")
+    # implicit în: Downloads\FIshare (director sigur, cu permisiuni)
+    download_dir: str = os.path.join(os.path.expanduser("~"), "Downloads", "FIshare")
     allow_incoming: bool = True
     listen_port: int = 49222
     discovery_port: int = 49221
 
     @staticmethod
     def load():
-        return Config(**Storage.load(Config().__dict__))
+        cfg = Config(**Storage.load(Config().__dict__))
+        # asigură existența directorului implicit
+        try:
+            os.makedirs(cfg.download_dir, exist_ok=True)
+        except Exception:
+            pass
+        return cfg
 
     def save(self):
         Storage.save(self)
@@ -64,8 +71,7 @@ def setup_logging():
     fh = RotatingFileHandler(LOG_FILE, maxBytes=5_000_000, backupCount=5, encoding="utf-8")
     fh.setFormatter(fmt)
 
-    # Avoid duplicate handlers if reconfigured
+    # Evită dublarea handlerelor
     if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):
         root.addHandler(ch)
         root.addHandler(fh)
-

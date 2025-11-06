@@ -28,7 +28,8 @@ class AppState:
         self.devices: Dict[str, Device] = {}
         self.selected_device_ids: List[str] = []
         self.selected_files: List[str] = []
-        self.progress: Dict[str, Dict[str, float]] = {}
+        # Un singur progress per device: 0..1
+        self.progress: Dict[str, float] = {}
 
     def set_status(self, status: AppStatus):
         with self._lock:
@@ -39,19 +40,25 @@ class AppState:
             dev.last_seen = time.time()
             self.devices[dev.device_id] = dev
 
-    def update_progress(self, device_id: str, file: str, ratio: float):
+    # ----- Progress simplificat (per device) -----
+    def update_progress(self, device_id: str, ratio: float):
         with self._lock:
-            self.progress.setdefault(device_id, {})[file] = ratio
+            self.progress[device_id] = max(0.0, min(1.0, float(ratio)))
 
-    def get_progress(self, device_id: str):
+    def get_progress(self, device_id: str) -> float:
         with self._lock:
-            return self.progress.get(device_id, {})
+            return float(self.progress.get(device_id, 0.0))
+
+    def clear_progress(self, device_id: str):
+        with self._lock:
+            self.progress.pop(device_id, None)
 
     def prune_devices(self, ttl_seconds: float = 6.0):
         with self._lock:
             now = time.time()
-            existing_ids = set(self.devices.keys())
+            # păstrează doar device-urile recente
             self.devices = {k: v for k, v in self.devices.items() if now - v.last_seen < ttl_seconds}
-
-            # Optional: remove progress for pruned devices
+            # curăță progres pentru device-uri dispărute
             self.progress = {k: v for k, v in self.progress.items() if k in self.devices}
+            # curăță selecțiile invalide
+            self.selected_device_ids = [d for d in self.selected_device_ids if d in self.devices]

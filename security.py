@@ -105,4 +105,3 @@ class Identity:
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw,
         )
-

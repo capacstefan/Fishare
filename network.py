@@ -201,8 +201,11 @@ class TransferService:
 
     def _ask_permission(self, addr, files_count, total_bytes) -> bool:
         """
-        Cheama UI-ul (PyQt) daca e disponibil. Daca nu, accepta implicit (comportament simplu).
+        Cheamă UI-ul (PyQt) dacă e disponibil. Dacă suntem în BUSY, respingem automat.
         """
+        # Busy => respinge automat (cerința 3/4)
+        if self.state.status == AppStatus.BUSY:
+            return False
         try:
             if self.ui_root and hasattr(self.ui_root, "ask_incoming_confirmation"):
                 return bool(self.ui_root.ask_incoming_confirmation(addr[0], files_count, total_bytes))
@@ -221,7 +224,7 @@ class TransferService:
                     return
 
                 files = req["files"]
-                total = req["total"]
+                total = int(req.get("total", 0))
 
                 accepted = self._ask_permission(addr, len(files), total)
 
@@ -229,35 +232,55 @@ class TransferService:
                 if not accepted:
                     return
 
-                # Receive each file
+                # Receive each file, tracking aggregated progress
+                received_total = 0
                 for _rel in files:
                     hdr = Proto.recv_json(conn, aead)
                     fname, size = hdr.get("file"), int(hdr.get("size", 0))
                     dest_path = os.path.join(self.state.cfg.download_dir, fname)
                     LOG.info(f"Receiving file: {fname} ({size} bytes)")
 
-                    received = 0
                     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                     with open(dest_path, "wb") as f:
-                        while received < size:
+                        remaining = size
+                        while remaining > 0:
                             chunk_obj = Proto.recv_json(conn, aead)
                             data_s = chunk_obj.get("data")
                             if not data_s:
                                 break
                             data = data_s.encode("latin1")
                             f.write(data)
-                            received += len(data)
-                            self.state.update_progress(addr[0], fname, received / max(1, size))
+                            received_total += len(data)
+                            remaining -= len(data)
+                            if total > 0:
+                                # pe receiver nu avem device-ul sender înregistrat neapărat;
+                                # nu forțăm UI pentru IP/port care nu există în listă
+                                self.state.update_progress(addr[0], received_total / total)
 
-                    LOG.info(f"Received {fname} ({received} bytes)")
+                    LOG.info(f"Received {fname}")
+
+                # finalizează progresul receiver-ului
+                self.state.update_progress(addr[0], 1.0)
+                self.state.clear_progress(addr[0])
 
             except Exception as e:
                 LOG.error(f"Receive error from {addr}: {e}", exc_info=True)
+                self.state.clear_progress(addr[0])
 
     # ---------------------- SENDER ----------------------
 
     def send_to(self, device, files: List[str]) -> bool:
-        total = sum(os.path.getsize(p) for p in files)
+        # Dacă device-ul este BUSY -> refuz instant (cerința 3)
+        if getattr(device, "status", AppStatus.AVAILABLE) == AppStatus.BUSY:
+            LOG.info(f"{device.name} este BUSY - refuz automat.")
+            try:
+                if self.ui_root and hasattr(self.ui_root, "notify_rejected"):
+                    self.ui_root.notify_rejected(device.name)
+            except Exception:
+                pass
+            return False
+
+        total = sum(os.path.getsize(p) for p in files) if files else 0
         for attempt in range(self.MAX_RETRIES):
             try:
                 LOG.info(f"Connecting to {device.name} ({device.host}:{device.port}) attempt {attempt+1}")
@@ -278,25 +301,34 @@ class TransferService:
                     resp = Proto.recv_json(sock, aead)
                     if not resp.get("accept"):
                         LOG.info(f"{device.name} a refuzat transferul.")
+                        try:
+                            if self.ui_root and hasattr(self.ui_root, "notify_rejected"):
+                                self.ui_root.notify_rejected(device.name)
+                        except Exception:
+                            pass
                         return False
 
-                    # Send each file
+                    # Send each file (agregăm progresul per device)
+                    sent_total = 0
                     for path in files:
                         fname = os.path.basename(path)
                         size = os.path.getsize(path)
                         Proto.send_json(sock, {"file": fname, "size": size}, aead)
 
                         with open(path, "rb") as f:
-                            sent = 0
                             while True:
                                 chunk = f.read(self.CHUNK_SIZE)
                                 if not chunk:
                                     break
                                 Proto.send_json(sock, {"data": chunk.decode("latin1")}, aead)
-                                sent += len(chunk)
-                                self.state.update_progress(device.device_id, fname, sent / max(1, size))
+                                sent_total += len(chunk)
+                                if total > 0:
+                                    self.state.update_progress(device.device_id, sent_total / total)
 
                     LOG.info(f"Transfer to {device.name} complete.")
+                    self.state.update_progress(device.device_id, 1.0)
+                    # curăță progresul după succes
+                    self.state.clear_progress(device.device_id)
                     return True
 
             except Exception as e:
@@ -304,4 +336,6 @@ class TransferService:
                 time.sleep(2)
 
         LOG.error(f"Transfer failed after {self.MAX_RETRIES} attempts to {device.name}")
+        # curăță progresul la eșec
+        self.state.clear_progress(device.device_id)
         return False

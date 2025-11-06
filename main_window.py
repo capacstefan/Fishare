@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSlot, pyqtSignal, QEvent
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QApplication, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
-    QFileDialog, QMessageBox, QScrollArea, QFrame, QProgressBar, QSizePolicy
+    QFileDialog, QMessageBox, QScrollArea, QFrame, QProgressBar
 )
 
 from state import AppStatus
@@ -15,7 +15,6 @@ from network import TransferService
 
 MAX_NAME_LEN = 32
 STATUS_DOT = {AppStatus.AVAILABLE: "🟢", AppStatus.BUSY: "🔴"}
-
 
 
 class StatusButtonToggle(QWidget):
@@ -88,66 +87,34 @@ class StatusButtonToggle(QWidget):
         }"""
 
 
-# -------- Widget pentru un device și progres fișiere -------- #
-class DeviceRowWidget(QFrame):
+# -------- Progress UI simplificat (un bar per device) -------- #
+class DeviceProgressRow(QFrame):
     def __init__(self, device_id: str, device_name: str, parent=None):
         super().__init__(parent)
         self.device_id = device_id
-        self._file_bars: Dict[str, QProgressBar] = {}
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
-
-        self.lbl_title = QLabel(f"{device_id}  {device_name}")
-        layout.addWidget(self.lbl_title)
-
-        self.files_container = QVBoxLayout()
-        layout.addLayout(self.files_container)
-
+        self.lbl = QLabel(f"{device_id}  {device_name}")
+        self.bar = QProgressBar()
+        self.bar.setMinimum(0)
+        self.bar.setMaximum(100)
+        layout.addWidget(self.lbl)
+        layout.addWidget(self.bar)
         self.setStyleSheet("""
-        QFrame {
-            background: #0f1216;
-            border: 1px solid #222831;
-            border-radius: 12px;
-        }
-        QLabel {
-            color: #dfe3e8;
-            font-weight: 600;
-        }
-        QProgressBar {
-            background: #13171c;
-            border: 1px solid #2a313a;
-            height: 12px;
-            border-radius: 6px;
-        }
-        QProgressBar::chunk {
-            background: #2c7a52;
-            border-radius: 6px;
-        }""")
+        QFrame { background: #0f1216; border: 1px solid #222831; border-radius: 12px; }
+        QLabel { color: #dfe3e8; font-weight: 600; }
+        QProgressBar { background: #13171c; border: 1px solid #2a313a; height: 12px; border-radius: 6px; }
+        QProgressBar::chunk { background: #2c7a52; border-radius: 6px; }
+        """)
 
-    def update_files(self, files: Dict[str, float]):
-        for name, pct in files.items():
-            if name not in self._file_bars:
-                self._add_file(name)
-            self._file_bars[name].setValue(int(pct * 100))
-
-    def _add_file(self, name: str):
-        lbl = QLabel(name)
-        bar = QProgressBar()
-        bar.setMinimum(0)
-        bar.setMaximum(100)
-
-        self.files_container.addWidget(lbl)
-        self.files_container.addWidget(bar)
-
-        self._file_bars[name] = bar
+    def set_ratio(self, ratio: float):
+        self.bar.setValue(int(round(max(0.0, min(1.0, ratio)) * 100)))
 
 
-# -------- Panou scrollabil pentru progres -------- #
 class ProgressPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.rows: Dict[str, DeviceRowWidget] = {}
+        self.rows: Dict[str, DeviceProgressRow] = {}
 
         layout = QVBoxLayout(self)
         scroll = QScrollArea()
@@ -160,14 +127,27 @@ class ProgressPanel(QWidget):
         self.inner_layout.addStretch()
 
     def update(self, state):
-        for dev_id, files in state.progress.items():
+        # adaugă/actualizează
+        for dev_id, ratio in list(state.progress.items()):
+            # dacă device-ul nu mai există, nu-l afișăm (evită KeyError)
             if dev_id not in state.devices:
-                continue  # Skip orphan progress entries
+                continue
             if dev_id not in self.rows:
-                row = DeviceRowWidget(dev_id, state.devices[dev_id].name)
+                row = DeviceProgressRow(dev_id, state.devices[dev_id].name)
                 self.rows[dev_id] = row
                 self.inner_layout.insertWidget(self.inner_layout.count() - 1, row)
-            self.rows[dev_id].update_files(files)
+            self.rows[dev_id].set_ratio(ratio)
+
+        # șterge automat barele pentru device-urile care au ajuns la 100% sau au dispărut din progress
+        to_remove = []
+        for dev_id, row in list(self.rows.items()):
+            if dev_id not in state.progress or state.get_progress(dev_id) >= 0.999:
+                to_remove.append(dev_id)
+        for dev_id in to_remove:
+            row = self.rows.pop(dev_id, None)
+            if row:
+                row.setParent(None)
+                row.deleteLater()
 
 
 # -------- Fereastra Principală -------- #
@@ -251,6 +231,23 @@ class FIshareQtApp(QMainWindow):
     def _apply_style(self):
         self.setStyleSheet("QMainWindow { background: #0b0e12; color: #e6e9ee; }")
 
+    # --------- Hooks pentru dialoguri Accept/Reject și refuz ---------
+    def ask_incoming_confirmation(self, host: str, files_count: int, total_bytes: int) -> bool:
+        # Busy => respinge automat
+        if self.app_state.status == AppStatus.BUSY:
+            return False
+        kb = max(1, int(round(total_bytes / 1024)))
+        reply = QMessageBox.question(
+            self,
+            "Cerere transfer",
+            f"Device {host} vrea să trimită {files_count} fișiere ({kb} KB).\nAccepți?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def notify_rejected(self, device_name: str):
+        QMessageBox.warning(self, "Transfer refuzat", f"Destinatarul '{device_name}' a refuzat transferul.")
+
     # Logic -------------------------------------------------------------
 
     @pyqtSlot(AppStatus)
@@ -275,14 +272,28 @@ class FIshareQtApp(QMainWindow):
 
     @pyqtSlot()
     def add_selected_device(self):
-        device_id = self.devices_list.currentItem().text().split()[0]
-        self.app_state.selected_device_ids.append(device_id)
+        item = self.devices_list.currentItem()
+        if not item:
+            return
+        device_id = item.text().split()[0]
+        dev = self.app_state.devices.get(device_id)
+        if not dev:
+            return
+        if dev.status == AppStatus.BUSY:
+            QMessageBox.information(self, "Ocupat", "Dispozitivul este în modul BUSY și nu poate fi adăugat.")
+            return
+        if device_id not in self.app_state.selected_device_ids:
+            self.app_state.selected_device_ids.append(device_id)
         self.refresh_lists()
 
     @pyqtSlot()
     def remove_selected_device(self):
-        device_id = self.selected_list.currentItem().text().split()[0]
-        self.app_state.selected_device_ids.remove(device_id)
+        item = self.selected_list.currentItem()
+        if not item:
+            return
+        device_id = item.text().split()[0]
+        if device_id in self.app_state.selected_device_ids:
+            self.app_state.selected_device_ids.remove(device_id)
         self.refresh_lists()
 
     @pyqtSlot()
@@ -292,7 +303,8 @@ class FIshareQtApp(QMainWindow):
 
     def _do_send(self):
         ok = sum(self.transfer.send_to(self.app_state.devices[dev_id], self.app_state.selected_files)
-                 for dev_id in self.app_state.selected_device_ids)
+                 for dev_id in list(self.app_state.selected_device_ids)
+                 if dev_id in self.app_state.devices)
         QApplication.instance().postEvent(self, _InvokeEvent(
             lambda: QMessageBox.information(self, "Transfer", f"Trimis la {ok} dispozitive")
         ))
@@ -310,7 +322,7 @@ class FIshareQtApp(QMainWindow):
 
         self.selected_list.clear()
         for dev_id in self.app_state.selected_device_ids:
-            if dev_id in self.app_state.devices:  # Safe guard
+            if dev_id in self.app_state.devices:
                 self.selected_list.addItem(QListWidgetItem(f"{dev_id} {self.app_state.devices[dev_id].name}"))
 
         self.files_list.clear()
