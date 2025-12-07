@@ -169,9 +169,10 @@ class TransferService:
     MAX_RETRIES = 3
     CHUNK_SIZE = 64 * 1024  # 64 KiB
 
-    def __init__(self, state, ui_root=None):
+    def __init__(self, state, ui_root=None, history=None):
         self.state = state
         self.ui_root = ui_root  # referință doar pentru context, NU o folosești în thread-urile de rețea
+        self.history = history  # Transfer history tracking
         self.identity = Identity()
         self.identity.load_or_create()
         self._stop = threading.Event()
@@ -179,6 +180,30 @@ class TransferService:
 
     def stop(self):
         self._stop.set()
+    
+    def _ask_user_accept(self, peer_name: str, num_files: int, total_size: int) -> bool:
+        """Ask user to accept or reject incoming transfer."""
+        if self.state.status == AppStatus.BUSY:
+            return False
+        
+        if not self.ui_root:
+            return True  # Auto-accept if no UI
+        
+        # Use Qt event system to show dialog in main thread
+        result = {"accepted": False}
+        event = _TransferRequestEvent(peer_name, num_files, total_size, result)
+        
+        from PyQt6.QtWidgets import QApplication
+        QApplication.instance().postEvent(self.ui_root, event)
+        
+        # Wait for user response (with timeout)
+        import time
+        for _ in range(300):  # 30 seconds timeout
+            if "decided" in result:
+                return result["accepted"]
+            time.sleep(0.1)
+        
+        return False  # Timeout = reject
 
     # ---------------------- RECEIVER ----------------------
 
@@ -210,16 +235,22 @@ class TransferService:
 
                 files = req.get("files", [])
                 total = int(req.get("total", 0))
+                peer_name = req.get("peer_name", "Unknown")
+                num_files = len(files)
 
-                # VARIANTA D: fără dialog în thread. Busy => refuz automat; altfel acceptăm.
-                accepted = (self.state.status != AppStatus.BUSY)
+                # Show dialog to user asking for accept/reject
+                accepted = self._ask_user_accept(peer_name, num_files, total)
 
                 Proto.send_json(conn, {"accept": bool(accepted)}, aead)
                 if not accepted:
-                    return  # refuzat (UI va afișa mesaj pe sender)
+                    LOG.info(f"Transfer rejected from {peer_name}")
+                    return
 
                 # Receive each file, tracking aggregated progress
+                self.state.start_transfer(addr[0])
+                start_time = time.time()
                 received_total = 0
+                
                 for _rel in files:
                     hdr = Proto.recv_json(conn, aead)
                     fname, size = hdr.get("file"), int(hdr.get("size", 0))
@@ -230,67 +261,89 @@ class TransferService:
                     with open(dest_path, "wb") as f:
                         remaining = size
                         while remaining > 0:
-                            chunk_obj = Proto.recv_json(conn, aead)
-                            data_s = chunk_obj.get("data")
-                            if not data_s:
-                                break
-                            data = data_s.encode("latin1")
+                            msg = Proto.recv_json(conn, aead)
+                            data = msg.get("data", "").encode("latin1")
                             f.write(data)
                             received_total += len(data)
                             remaining -= len(data)
                             if total > 0:
-                                # Progresul pe receiver se ține per IP (addr[0]); UI îl va filtra dacă nu are device-ul în listă
-                                self.state.update_progress(addr[0], received_total / total)
+                                self.state.update_progress(addr[0], received_total / total, received_total)
 
                     LOG.info(f"Received {fname}")
 
                 # finalizează progresul receiver-ului
-                self.state.update_progress(addr[0], 1.0)
+                duration = time.time() - start_time
+                self.state.update_progress(addr[0], 1.0, received_total)
+                
+                # Add to history
+                if self.history:
+                    from history import TransferRecord
+                    from state import TransferStatus
+                    peer_name = req.get("peer_name", "Unknown")
+                    self.history.add_record(TransferRecord(
+                        timestamp=start_time,
+                        direction="received",
+                        peer_name=peer_name,
+                        peer_host=addr[0],
+                        num_files=len(files),
+                        total_size=total,
+                        duration=duration,
+                        status=TransferStatus.COMPLETED.value
+                    ))
+                
                 self.state.clear_progress(addr[0])
 
             except Exception as e:
                 LOG.error(f"Receive error from {addr}: {e}", exc_info=True)
+                from state import TransferStatus
+                self.state.set_transfer_status(addr[0], TransferStatus.ERROR)
                 self.state.clear_progress(addr[0])
 
     # ---------------------- SENDER ----------------------
 
     def send_to(self, device, files: List[str]) -> bool:
-        # Dacă device-ul este BUSY -> refuz instant și anunțăm UI prin buffer (varianta D)
-        if getattr(device, "status", AppStatus.AVAILABLE) == AppStatus.BUSY:
-            LOG.info(f"{device.name} este BUSY - refuz automat.")
-            # adaugă o notificare pentru UI (va fi afișată în refresh_ui)
-            try:
-                self.state.rejections.append(device.name)
-            except Exception:
-                pass
-            return False
-
         total = sum(os.path.getsize(p) for p in files) if files else 0
+        start_time = time.time()
+        
         for attempt in range(self.MAX_RETRIES):
             try:
                 LOG.info(f"Connecting to {device.name} ({device.host}:{device.port}) attempt {attempt+1}")
-                with socket.create_connection((device.host, device.port), timeout=5) as sock:
+                self.state.start_transfer(device.device_id)
+                
+                with socket.create_connection((device.host, device.port), timeout=10) as sock:
                     aead = key_agree(sock, self.identity.sign)
 
-                    # Send transfer request
-                    Proto.send_json(
-                        sock,
-                        {
-                            "type": "send_request",
-                            "files": [os.path.basename(p) for p in files],
-                            "total": total,
-                        },
-                        aead,
-                    )
+                    # Trimite request cu lista de fișiere și informații despre transfer
+                    files_rel = [os.path.basename(p) for p in files]
+                    Proto.send_json(sock, {
+                        "type": "send_request",
+                        "files": files_rel,
+                        "total": total,
+                        "peer_name": self.state.cfg.device_name
+                    }, aead)
 
                     resp = Proto.recv_json(sock, aead)
                     if not resp.get("accept"):
-                        LOG.info(f"{device.name} a refuzat transferul.")
-                        # UI notification prin buffer (UI o va afișa în refresh_ui)
-                        try:
-                            self.state.rejections.append(device.name)
-                        except Exception:
-                            pass
+                        LOG.info(f"{device.name} refused the transfer.")
+                        from state import TransferStatus
+                        self.state.set_transfer_status(device.device_id, TransferStatus.CANCELED)
+                        self.state.update_progress(device.device_id, 1.0, 0)
+                        
+                        # Add to history as canceled
+                        if self.history:
+                            from history import TransferRecord
+                            self.history.add_record(TransferRecord(
+                                timestamp=start_time,
+                                direction="sent",
+                                peer_name=device.name,
+                                peer_host=device.host,
+                                num_files=len(files),
+                                total_size=total,
+                                duration=time.time() - start_time,
+                                status=TransferStatus.CANCELED.value,
+                                error_msg="Transfer rejected by recipient"
+                            ))
+                        
                         return False
 
                     # Send each file (agregăm progresul per device)
@@ -308,17 +361,68 @@ class TransferService:
                                 Proto.send_json(sock, {"data": chunk.decode("latin1")}, aead)
                                 sent_total += len(chunk)
                                 if total > 0:
-                                    self.state.update_progress(device.device_id, sent_total / total)
+                                    self.state.update_progress(device.device_id, sent_total / total, sent_total)
 
                     LOG.info(f"Transfer to {device.name} complete.")
-                    self.state.update_progress(device.device_id, 1.0)
+                    duration = time.time() - start_time
+                    self.state.update_progress(device.device_id, 1.0, sent_total)
+                    
+                    # Add to history
+                    if self.history:
+                        from history import TransferRecord
+                        from state import TransferStatus
+                        self.history.add_record(TransferRecord(
+                            timestamp=start_time,
+                            direction="sent",
+                            peer_name=device.name,
+                            peer_host=device.host,
+                            num_files=len(files),
+                            total_size=total,
+                            duration=duration,
+                            status=TransferStatus.COMPLETED.value
+                        ))
+                    
                     self.state.clear_progress(device.device_id)
                     return True
 
             except Exception as e:
                 LOG.warning(f"Send attempt {attempt+1} failed for {device.name}: {e}")
+                if attempt == self.MAX_RETRIES - 1:  # Last attempt
+                    duration = time.time() - start_time
+                    from state import TransferStatus
+                    self.state.set_transfer_status(device.device_id, TransferStatus.ERROR)
+                    
+                    if self.history:
+                        from history import TransferRecord
+                        self.history.add_record(TransferRecord(
+                            timestamp=start_time,
+                            direction="sent",
+                            peer_name=device.name,
+                            peer_host=device.host,
+                            num_files=len(files),
+                            total_size=total,
+                            duration=duration,
+                            status=TransferStatus.ERROR.value,
+                            error_msg=str(e)
+                        ))
                 time.sleep(2)
 
         LOG.error(f"Transfer failed after {self.MAX_RETRIES} attempts to {device.name}")
+        from state import TransferStatus
+        self.state.set_transfer_status(device.device_id, TransferStatus.ERROR)
         self.state.clear_progress(device.device_id)
         return False
+
+
+# Custom Qt Event for transfer request dialog
+from PyQt6.QtCore import QEvent
+
+class _TransferRequestEvent(QEvent):
+    _TYPE = QEvent.Type(QEvent.registerEventType())
+    
+    def __init__(self, peer_name: str, num_files: int, total_size: int, result: dict):
+        super().__init__(self._TYPE)
+        self.peer_name = peer_name
+        self.num_files = num_files
+        self.total_size = total_size
+        self.result = result

@@ -10,8 +10,9 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QScrollArea, QFrame, QProgressBar
 )
 
-from state import AppStatus
-from network import TransferService
+from state import AppStatus, TransferStatus
+from network import TransferService, _TransferRequestEvent
+from history_window import HistoryWindow
 
 MAX_NAME_LEN = 32
 STATUS_DOT = {AppStatus.AVAILABLE: "🟢", AppStatus.BUSY: "🔴"}
@@ -88,9 +89,10 @@ class StatusButtonToggle(QWidget):
 
 
 class DeviceProgressRow(QFrame):
-    def __init__(self, device_id: str, device_name: str, parent=None):
+    def __init__(self, device_id: str, device_name: str, app_state=None, parent=None):
         super().__init__(parent)
         self.device_id = device_id
+        self.app_state = app_state
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
 
@@ -102,20 +104,65 @@ class DeviceProgressRow(QFrame):
         layout.addWidget(self.lbl)
         layout.addWidget(self.bar)
 
-        self.setStyleSheet("""
-        QFrame { background: #0f1216; border: 1px solid #222831; border-radius: 12px; }
-        QLabel { color: #dfe3e8; font-weight: 600; }
-        QProgressBar { background: #13171c; border: 1px solid #2a313a; height: 12px; border-radius: 6px; }
-        QProgressBar::chunk { background: #2c7a52; border-radius: 6px; }
-        """)
+        self._update_style()
 
+    def _update_style(self):
+        """Update style based on transfer status."""
+        if self.app_state:
+            status = self.app_state.get_transfer_status(self.device_id)
+            if status == TransferStatus.CANCELED:
+                # Red progress bar for canceled
+                self.setStyleSheet("""
+                QFrame { background: #0f1216; border: 1px solid #222831; border-radius: 12px; }
+                QLabel { color: #ff6b6b; font-weight: 600; font-size: 14px; }
+                QProgressBar { background: #13171c; border: 1px solid #2a313a; height: 14px; border-radius: 6px; }
+                QProgressBar::chunk { background: #d32f2f; border-radius: 6px; }
+                """)
+            elif status == TransferStatus.ERROR:
+                # Orange progress bar for error
+                self.setStyleSheet("""
+                QFrame { background: #0f1216; border: 1px solid #222831; border-radius: 12px; }
+                QLabel { color: #ff9800; font-weight: 600; font-size: 14px; }
+                QProgressBar { background: #13171c; border: 1px solid #2a313a; height: 14px; border-radius: 6px; }
+                QProgressBar::chunk { background: #f57c00; border-radius: 6px; }
+                """)
+            else:
+                # Green progress bar for completed
+                self.setStyleSheet("""
+                QFrame { background: #0f1216; border: 1px solid #222831; border-radius: 12px; }
+                QLabel { color: #dfe3e8; font-weight: 600; font-size: 14px; }
+                QProgressBar { background: #13171c; border: 1px solid #2a313a; height: 14px; border-radius: 6px; }
+                QProgressBar::chunk { background: #2c7a52; border-radius: 6px; }
+                """)
+    
     def set_ratio(self, ratio: float):
         self.bar.setValue(int(round(max(0.0, min(1.0, ratio)) * 100)))
+        
+        # Update label with speed or status
+        if self.app_state:
+            status = self.app_state.get_transfer_status(self.device_id)
+            device = self.app_state.devices.get(self.device_id)
+            device_name = device.name if device else self.device_id
+            
+            if status == TransferStatus.CANCELED:
+                self.lbl.setText(f"{self.device_id}  {device_name} - CANCELED")
+                self._update_style()
+            elif status == TransferStatus.ERROR:
+                self.lbl.setText(f"{self.device_id}  {device_name} - ERROR")
+                self._update_style()
+            else:
+                speed = self.app_state.get_speed(self.device_id)
+                if speed > 0:
+                    self.lbl.setText(f"{self.device_id}  {device_name} - {speed:.2f} MB/s")
+                else:
+                    self.lbl.setText(f"{self.device_id}  {device_name}")
+                self._update_style()
 
 
 class ProgressPanel(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, app_state=None, parent=None):
         super().__init__(parent)
+        self.app_state = app_state
         self.rows: Dict[str, DeviceProgressRow] = {}
 
         layout = QVBoxLayout(self)
@@ -133,30 +180,43 @@ class ProgressPanel(QWidget):
             if dev_id not in state.devices:
                 continue
             if dev_id not in self.rows:
-                row = DeviceProgressRow(dev_id, state.devices[dev_id].name)
+                row = DeviceProgressRow(dev_id, state.devices[dev_id].name, state)
                 self.rows[dev_id] = row
                 self.inner_layout.insertWidget(self.inner_layout.count() - 1, row)
             self.rows[dev_id].set_ratio(ratio)
 
         to_remove = []
         for dev_id, row in list(self.rows.items()):
-            if dev_id not in state.progress or state.get_progress(dev_id) >= 0.999:
+            if dev_id not in state.progress:
                 to_remove.append(dev_id)
+            elif state.get_progress(dev_id) >= 0.999:
+                # For canceled/error transfers, wait 3 seconds before removing
+                status = state.get_transfer_status(dev_id)
+                if status in (TransferStatus.CANCELED, TransferStatus.ERROR):
+                    # Schedule removal after 3 seconds
+                    QTimer.singleShot(3000, lambda d=dev_id: self._remove_row(d))
+                else:
+                    to_remove.append(dev_id)
 
         for dev_id in to_remove:
-            row = self.rows.pop(dev_id, None)
-            if row:
-                row.setParent(None)
-                row.deleteLater()
+            self._remove_row(dev_id)
+    
+    def _remove_row(self, dev_id: str):
+        """Remove a progress row."""
+        row = self.rows.pop(dev_id, None)
+        if row:
+            row.setParent(None)
+            row.deleteLater()
 
 
 class FIshareQtApp(QMainWindow):
-    def __init__(self, state, advertiser, scanner):
+    def __init__(self, state, advertiser, scanner, history=None):
         super().__init__()
         self.app_state = state
         self.advertiser = advertiser
         self.scanner = scanner
-        self.transfer = TransferService(state, self)
+        self.history = history
+        self.transfer = TransferService(state, self, history)
 
         self.setWindowTitle("FIshare")
         self.resize(1024, 720)
@@ -189,6 +249,11 @@ class FIshareQtApp(QMainWindow):
         btn = QPushButton("Folder")
         btn.clicked.connect(self.pick_download_dir)
         layout.addWidget(btn)
+        
+        btn_history = QPushButton("Istoric")
+        btn_history.clicked.connect(self.show_history)
+        layout.addWidget(btn_history)
+        
         return layout
 
     def _build_body(self):
@@ -213,7 +278,100 @@ class FIshareQtApp(QMainWindow):
         btn.clicked.connect(self.pick_files)
         right.addWidget(btn)
         right.addWidget(QLabel("Progres"))
-        self.progress_panel = ProgressPanel()
+        self.progress_panel = ProgressPanel(self.app_state)
+        right.addWidget(self.progress_panel)
+
+        body.addLayout(left, 1)
+        body.addLayout(right, 1)
+        return body
+
+    def _build_bottom_bar(self):
+        layout = QHBoxLayout()
+        layout.addStretch()
+        self.send_btn = QPushButton("Trimite")
+        self.send_btn.clicked.connect(self.on_send)
+        layout.addWidget(self.send_btn)
+        container = QWidget()
+        container.setLayout(layout)
+        return container
+
+        for dev_id in to_remove:
+            row = self.rows.pop(dev_id, None)
+            if row:
+                row.setParent(None)
+                row.deleteLater()
+
+
+class FIshareQtApp(QMainWindow):
+    def __init__(self, state, advertiser, scanner, history=None):
+        super().__init__()
+        self.app_state = state
+        self.advertiser = advertiser
+        self.scanner = scanner
+        self.history = history
+        self.transfer = TransferService(state, self, history)
+
+        self.setWindowTitle("FIshare")
+        self.resize(1024, 720)
+        self._apply_style()
+
+        central = QWidget()
+        root = QVBoxLayout(central)
+        self.setCentralWidget(central)
+
+        root.addLayout(self._build_top_bar())
+        root.addLayout(self._build_body())
+        root.addWidget(self._build_bottom_bar())
+
+        self.timer = QTimer(self, timeout=self.refresh_ui)
+        self.timer.start(600)
+
+    def _build_top_bar(self):
+        layout = QHBoxLayout()
+        layout.addWidget(QLabel("FIshare"))
+        layout.addWidget(QLabel("Nume"))
+        self.name_edit = QLineEdit(self.app_state.cfg.device_name)
+        self.name_edit.setMaxLength(MAX_NAME_LEN)
+        self.name_edit.textEdited.connect(self.on_name_changed)
+        layout.addWidget(self.name_edit)
+        layout.addWidget(QLabel("Status"))
+        self.status_toggle = StatusButtonToggle(self.app_state.status, self)
+        self.status_toggle.status_changed.connect(self.on_status_toggled)
+        layout.addWidget(self.status_toggle)
+
+        btn = QPushButton("Folder")
+        btn.clicked.connect(self.pick_download_dir)
+        layout.addWidget(btn)
+        
+        btn_history = QPushButton("Istoric")
+        btn_history.clicked.connect(self.show_history)
+        layout.addWidget(btn_history)
+        
+        return layout
+
+    def _build_body(self):
+        body = QHBoxLayout()
+
+        left = QVBoxLayout()
+        left.addWidget(QLabel("Dispozitive"))
+        self.devices_list = QListWidget()
+        self.devices_list.itemDoubleClicked.connect(self.add_selected_device)
+        left.addWidget(self.devices_list)
+
+        right = QVBoxLayout()
+        right.addWidget(QLabel("Destinații"))
+        self.selected_list = QListWidget()
+        self.selected_list.itemDoubleClicked.connect(self.remove_selected_device)
+        right.addWidget(self.selected_list)
+        right.addWidget(QLabel("Fișiere"))
+        self.files_list = QListWidget()
+        right.addWidget(self.files_list)
+
+        btn = QPushButton("Adaugă fișiere")
+        btn.clicked.connect(self.pick_files)
+        right.addWidget(btn)
+        right.addWidget(QLabel("Progres"))
+        self.progress_panel = ProgressPanel(self.app_state)
         right.addWidget(self.progress_panel)
 
         body.addLayout(left, 1)
@@ -231,7 +389,60 @@ class FIshareQtApp(QMainWindow):
         return container
 
     def _apply_style(self):
-        self.setStyleSheet("QMainWindow { background: #0b0e12; color: #e6e9ee; }")
+        self.setStyleSheet("""
+        QMainWindow { 
+            background: #0b0e12; 
+            color: #e6e9ee; 
+            font-size: 15px;
+        }
+        QLabel {
+            font-size: 15px;
+            color: #e6e9ee;
+        }
+        QPushButton {
+            font-size: 14px;
+            padding: 10px 18px;
+            background: #1c2128;
+            color: #e6e9ee;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            min-width: 80px;
+        }
+        QPushButton:hover {
+            background: #2d333b;
+            border-color: #484f58;
+        }
+        QPushButton:pressed {
+            background: #1c2128;
+        }
+        QLineEdit {
+            font-size: 15px;
+            padding: 8px 12px;
+            background: #13171c;
+            color: #e6e9ee;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+        }
+        QLineEdit:focus {
+            border-color: #58a6ff;
+        }
+        QListWidget {
+            font-size: 15px;
+            background: #13171c;
+            color: #e6e9ee;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+        }
+        QListWidget::item {
+            padding: 8px;
+        }
+        QListWidget::item:hover {
+            background: #1c2128;
+        }
+        QListWidget::item:selected {
+            background: #2d333b;
+        }
+        """)
 
     @pyqtSlot(AppStatus)
     def on_status_toggled(self, status):
@@ -295,11 +506,6 @@ class FIshareQtApp(QMainWindow):
 
     @pyqtSlot()
     def refresh_ui(self):
-        if self.app_state.rejections:
-            for dev_name in self.app_state.rejections:
-                QMessageBox.warning(self, "Transfer refuzat", f"Destinatarul '{dev_name}' a refuzat transferul.")
-            self.app_state.rejections.clear()
-
         self.refresh_lists()
         self.progress_panel.update(self.app_state)
 
@@ -317,11 +523,38 @@ class FIshareQtApp(QMainWindow):
         for file in self.app_state.selected_files:
             self.files_list.addItem(QListWidgetItem(file))
 
+    @pyqtSlot()
+    def show_history(self):
+        if self.history:
+            dialog = HistoryWindow(self.history, self)
+            dialog.exec()
+    
     def event(self, event):
         if isinstance(event, _InvokeEvent):
             event.performAction()
             return True
+        elif isinstance(event, _TransferRequestEvent):
+            self._handle_transfer_request(event)
+            return True
         return super().event(event)
+    
+    def _handle_transfer_request(self, event: _TransferRequestEvent):
+        """Handle incoming transfer request dialog."""
+        size_mb = event.total_size / (1024 * 1024)
+        msg = (f"{event.peer_name} wants to send you {event.num_files} file(s) "
+               f"with a total size of {size_mb:.2f} MB.\n\n"
+               f"Do you want to accept this transfer?")
+        
+        reply = QMessageBox.question(
+            self,
+            "Incoming Transfer",
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        
+        event.result["accepted"] = (reply == QMessageBox.StandardButton.Yes)
+        event.result["decided"] = True
 
 
 class _InvokeEvent(QEvent):

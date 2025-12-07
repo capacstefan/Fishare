@@ -12,6 +12,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 LOG_FILE = os.path.join(DATA_DIR, "fishare.log")
 KEY_FILE = os.path.join(DATA_DIR, "id_ed25519.pem")
+HISTORY_FILE = os.path.join(DATA_DIR, "transfer_history.json")
 
 
 class Storage:

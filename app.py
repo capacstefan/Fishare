@@ -5,12 +5,14 @@ from config import setup_logging, Config
 from state import AppState
 from network import Advertiser, Scanner
 from main_window import FIshareQtApp
+from history import TransferHistory
 
 
 def main():
     setup_logging()
     cfg = Config.load()
     state = AppState(cfg)
+    history = TransferHistory()
 
     advertiser = Advertiser(state)
     scanner = Scanner(state)
@@ -18,7 +20,7 @@ def main():
     scanner.start()
 
     app = QApplication(sys.argv)
-    window = FIshareQtApp(state, advertiser, scanner)
+    window = FIshareQtApp(state, advertiser, scanner, history)
     window.show()
 
     ret = 0
