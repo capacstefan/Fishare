@@ -1,162 +1,238 @@
+"""Main application window — modern, airy, Apple-inspired dark UI."""
+
 from __future__ import annotations
+
+import os
 import threading
 from typing import Dict
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSlot, QEvent, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QApplication, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
-    QFileDialog, QMessageBox, QScrollArea, QFrame, QProgressBar
+    QApplication,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
-from state import AppStatus, TransferStatus
-from network import TransferService, _TransferRequestEvent
 from history_window import HistoryWindow
+from network import TransferRequestEvent, TransferService
+from state import AppStatus, TransferStatus
 
 MAX_NAME_LEN = 32
-STATUS_DOT = {AppStatus.AVAILABLE: "🟢", AppStatus.BUSY: "🔴"}
 
 
-# ========================================================
-# Status Toggle (păstrează culorile tale)
-# ========================================================
+# ── Helper: human-readable file size ───────────────────
 
-class StatusButtonToggle(QWidget):
+
+def _human_size(b: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if b < 1024:
+            return f"{b:.1f} {unit}" if unit != "B" else f"{b} {unit}"
+        b /= 1024
+    return f"{b:.2f} TB"
+
+
+# ════════════════════════════════════════════════════════
+#  Status Toggle
+# ════════════════════════════════════════════════════════
+
+
+class _StatusToggle(QWidget):
     status_changed = pyqtSignal(AppStatus)
 
-    def __init__(self, current_status: AppStatus, parent=None):
+    _ACTIVE_CSS = {
+        AppStatus.AVAILABLE: """
+            QPushButton {
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #34c759, stop:1 #28a745);
+                color: #fff; font-weight: 600;
+                padding: 7px 18px; border-radius: 8px; border: none;
+            }""",
+        AppStatus.BUSY: """
+            QPushButton {
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #ff453a, stop:1 #d63031);
+                color: #fff; font-weight: 600;
+                padding: 7px 18px; border-radius: 8px; border: none;
+            }""",
+    }
+    _INACTIVE_CSS = """
+        QPushButton {
+            background: transparent; color: #8e8e93;
+            padding: 7px 18px; border-radius: 8px; border: none;
+        }
+        QPushButton:hover { background: rgba(255,255,255,0.06); }
+    """
+
+    def __init__(self, current: AppStatus, parent=None):
         super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0,0,0,0)
+        self.btn_avail = QPushButton("Available")
+        self.btn_busy = QPushButton("Busy")
+        for b in (self.btn_avail, self.btn_busy):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setCheckable(True)
+        lay.addWidget(self.btn_avail)
+        lay.addWidget(self.btn_busy)
 
-        self.btn_available = self._make_btn("Available")
-        self.btn_busy = self._make_btn("Busy")
-
-        layout.addWidget(self.btn_available)
-        layout.addWidget(self.btn_busy)
-
-        self.btn_available.clicked.connect(lambda: self._set(AppStatus.AVAILABLE))
+        self.btn_avail.clicked.connect(lambda: self._set(AppStatus.AVAILABLE))
         self.btn_busy.clicked.connect(lambda: self._set(AppStatus.BUSY))
-        self._set(current_status, init=True)
+        self._set(current, emit=False)
 
-    def _make_btn(self, text):
-        btn = QPushButton(text)
-        btn.setCheckable(True)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        return btn
-
-    def _set(self, status: AppStatus, init=False):
-        self.btn_available.setChecked(status == AppStatus.AVAILABLE)
-        self.btn_busy.setChecked(status == AppStatus.BUSY)
-
-        self._apply_style(self.btn_available, "green")
-        self._apply_style(self.btn_busy, "red")
-
-        if not init:
+    def _set(self, status: AppStatus, emit=True):
+        is_avail = status == AppStatus.AVAILABLE
+        self.btn_avail.setChecked(is_avail)
+        self.btn_busy.setChecked(not is_avail)
+        self.btn_avail.setStyleSheet(
+            self._ACTIVE_CSS[AppStatus.AVAILABLE] if is_avail else self._INACTIVE_CSS
+        )
+        self.btn_busy.setStyleSheet(
+            self._ACTIVE_CSS[AppStatus.BUSY] if not is_avail else self._INACTIVE_CSS
+        )
+        if emit:
             self.status_changed.emit(status)
 
-    def _apply_style(self, btn, color):
-        if btn.isChecked():
-            btn.setStyleSheet(
-                f"""
-                QPushButton {{
-                    background:{color};
-                    color:white;
-                    padding:8px;
-                    border-radius:6px;
-                }}"""
-            )
-        else:
-            btn.setStyleSheet("""
-                QPushButton {
-                    background:#2b3037;
-                    color:#b7bfca;
-                    padding:6px;
-                    border-radius:4px;
-                }
-                QPushButton:hover {
-                    background:#40464f;
-                }"""
-            )
+
+# ════════════════════════════════════════════════════════
+#  Progress row / panel
+# ════════════════════════════════════════════════════════
 
 
-# ========================================================
-# PROGRESS ROW (culori păstrate)
-# ========================================================
+class _ProgressRow(QFrame):
+    """A single device transfer progress indicator."""
 
-class DeviceProgressRow(QFrame):
     def __init__(self, dev_id: str, name: str, app_state, parent=None):
         super().__init__(parent)
         self.dev_id = dev_id
-        self.app_state = app_state
+        self._state = app_state
+        self.setObjectName("progressRow")
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10,10,10,10)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
 
-        self.lbl = QLabel(f"{dev_id}  {name}")
+        self.lbl = QLabel(name)
+        self.lbl.setStyleSheet("font-size: 13px; color: #e5e5ea;")
+
         self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(6)
 
-        layout.addWidget(self.lbl)
-        layout.addWidget(self.bar)
+        lay.addWidget(self.lbl)
+        lay.addWidget(self.bar)
 
-    def set_ratio(self, ratio):
+    def set_ratio(self, ratio: float):
         self.bar.setValue(int(ratio * 100))
-        status = self.app_state.get_transfer_status(self.dev_id)
-        device = self.app_state.devices.get(self.dev_id)
-        name = device.name if device else self.dev_id
+        status = self._state.get_transfer_status(self.dev_id)
+        dev = self._state.devices.get(self.dev_id)
+        name = dev.name if dev else self.dev_id
 
         if status == TransferStatus.CANCELED:
-            self.lbl.setText(f"{name} - CANCELED")
+            self.lbl.setText(f"{name}  —  Canceled")
+            self.bar.setStyleSheet(
+                "QProgressBar::chunk { background: #ff9f0a; border-radius: 3px; }"
+            )
         elif status == TransferStatus.ERROR:
-            self.lbl.setText(f"{name} - ERROR")
+            self.lbl.setText(f"{name}  —  Error")
+            self.bar.setStyleSheet(
+                "QProgressBar::chunk { background: #ff453a; border-radius: 3px; }"
+            )
         else:
-            speed = self.app_state.get_speed(self.dev_id)
-            self.lbl.setText(f"{name} - {speed:.2f} MB/s" if speed > 0 else name)
+            speed = self._state.get_speed(self.dev_id)
+            extra = f"  —  {speed:.1f} MB/s" if speed > 0 else ""
+            self.lbl.setText(f"{name}{extra}")
+            self.bar.setStyleSheet(
+                "QProgressBar::chunk { background: #0a84ff; border-radius: 3px; }"
+            )
 
 
-# ========================================================
-# PROGRESS PANEL
-# ========================================================
+class _ProgressPanel(QWidget):
+    """Scrollable list of active transfer progress bars."""
 
-class ProgressPanel(QWidget):
     def __init__(self, app_state, parent=None):
         super().__init__(parent)
-        self.app_state = app_state
-        self.rows: Dict[str, DeviceProgressRow] = {}
+        self._state = app_state
+        self.rows: Dict[str, _ProgressRow] = {}
 
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        layout.addWidget(scroll)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(scroll)
 
-        self.inner = QWidget()
-        self.inner_layout = QVBoxLayout(self.inner)
-        self.inner_layout.addStretch()
-        scroll.setWidget(self.inner)
+        self._inner = QWidget()
+        self._inner_lay = QVBoxLayout(self._inner)
+        self._inner_lay.setContentsMargins(0, 0, 0, 0)
+        self._inner_lay.setSpacing(6)
+        self._inner_lay.addStretch()
+        scroll.setWidget(self._inner)
 
-    def update(self, state):
-        for dev_id, ratio in state.progress.items():
+    def refresh(self, progress_snap: dict, devices_snap: dict):
+        # Add / update rows
+        for dev_id, ratio in progress_snap.items():
             if dev_id not in self.rows:
-                row = DeviceProgressRow(dev_id, state.devices[dev_id].name, state)
+                dev = devices_snap.get(dev_id)
+                name = dev.name if dev else dev_id
+                row = _ProgressRow(dev_id, name, self._state)
                 self.rows[dev_id] = row
-                self.inner_layout.insertWidget(self.inner_layout.count()-1, row)
+                self._inner_lay.insertWidget(self._inner_lay.count() - 1, row)
             self.rows[dev_id].set_ratio(ratio)
 
-        remove = [d for d in self.rows if d not in state.progress]
-        for d in remove:
+        # Remove finished rows
+        gone = [d for d in self.rows if d not in progress_snap]
+        for d in gone:
+            self.rows[d].setParent(None)
             self.rows[d].deleteLater()
             del self.rows[d]
 
 
-# ========================================================
-# MAIN WINDOW (tema dark păstrată)
-# ========================================================
+# ════════════════════════════════════════════════════════
+#  Section card helper
+# ════════════════════════════════════════════════════════
+
+
+def _section(title: str, widget: QWidget) -> QVBoxLayout:
+    """Wrap a widget in a titled section."""
+    lay = QVBoxLayout()
+    lay.setSpacing(8)
+    lbl = QLabel(title)
+    lbl.setStyleSheet(
+        "font-size: 11px; font-weight: 700; color: #8e8e93; "
+        "letter-spacing: 1px; text-transform: uppercase;"
+    )
+    lay.addWidget(lbl)
+    lay.addWidget(widget, 1)
+    return lay
+
+
+# ════════════════════════════════════════════════════════
+#  Main window
+# ════════════════════════════════════════════════════════
+
 
 class FIshareQtApp(QMainWindow):
+    """Main FIshare application window."""
+
     def __init__(self, state, advertiser, scanner, history=None):
         super().__init__()
-
         self.state = state
         self.advertiser = advertiser
         self.scanner = scanner
@@ -164,250 +240,444 @@ class FIshareQtApp(QMainWindow):
         self.transfer = TransferService(state, self, history)
 
         self.setWindowTitle("FIshare")
-        self.resize(1024, 720)
-        self._apply_style()
+        self.resize(1060, 740)
+        self.setMinimumSize(760, 500)
 
+        self._build_ui()
+        self._apply_global_style()
+
+        # Periodic UI refresh
+        self._timer = QTimer(self, timeout=self._refresh_ui)
+        self._timer.start(500)
+
+    # ── Build UI ────────────────────────────────────────
+
+    def _build_ui(self):
         central = QWidget()
         root = QVBoxLayout(central)
+        root.setContentsMargins(28, 22, 28, 22)
+        root.setSpacing(20)
         self.setCentralWidget(central)
 
-        root.addLayout(self._top())
-        root.addLayout(self._body())
-        root.addWidget(self._bottom())
+        root.addLayout(self._build_toolbar())
 
-        self.timer = QTimer(timeout=self.refresh_ui)
-        self.timer.start(500)
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("background: #2c2c2e; max-height: 1px;")
+        root.addWidget(sep)
 
-    # ---------------- TOP ----------------
+        root.addLayout(self._build_body(), 1)
+        root.addLayout(self._build_footer())
 
-    def _top(self):
-        layout = QHBoxLayout()
-        layout.addWidget(QLabel("FIshare"))
-        layout.addWidget(QLabel("Name"))
+    # ── Toolbar ─────────────────────────────────────────
+
+    def _build_toolbar(self) -> QHBoxLayout:
+        bar = QHBoxLayout()
+        bar.setSpacing(16)
+
+        # App title
+        title = QLabel("FIshare")
+        title.setStyleSheet(
+            "font-size: 22px; font-weight: 700; color: #ffffff; letter-spacing: 0.5px;"
+        )
+        bar.addWidget(title)
+
+        bar.addSpacing(20)
+
+        # Device name
+        name_lbl = QLabel("Name")
+        name_lbl.setStyleSheet("color: #8e8e93; font-size: 13px;")
+        bar.addWidget(name_lbl)
 
         self.name_edit = QLineEdit(self.state.cfg.device_name)
         self.name_edit.setMaxLength(MAX_NAME_LEN)
+        self.name_edit.setFixedWidth(180)
         self.name_edit.textEdited.connect(self._on_name)
-        layout.addWidget(self.name_edit)
+        bar.addWidget(self.name_edit)
 
-        layout.addWidget(QLabel("Status"))
-        self.status_toggle = StatusButtonToggle(self.state.status)
+        bar.addSpacing(10)
+
+        # Status toggle
+        self.status_toggle = _StatusToggle(self.state.status)
         self.status_toggle.status_changed.connect(self._on_status)
-        layout.addWidget(self.status_toggle)
+        bar.addWidget(self.status_toggle)
 
-        btn_folder = QPushButton("Folder")
+        bar.addStretch()
+
+        # Folder button
+        btn_folder = QPushButton("📂  Folder")
+        btn_folder.setObjectName("toolBtn")
         btn_folder.clicked.connect(self._pick_folder)
-        layout.addWidget(btn_folder)
+        bar.addWidget(btn_folder)
 
-        btn_hist = QPushButton("History")
+        # History button
+        btn_hist = QPushButton("🕘  History")
+        btn_hist.setObjectName("toolBtn")
         btn_hist.clicked.connect(self._show_history)
-        layout.addWidget(btn_hist)
+        bar.addWidget(btn_hist)
 
-        return layout
+        return bar
 
-    # ---------------- BODY ----------------
+    # ── Body ────────────────────────────────────────────
 
-    def _body(self):
+    def _build_body(self) -> QHBoxLayout:
         body = QHBoxLayout()
+        body.setSpacing(20)
 
-        # left
+        # ─ Left: discovered devices
+        self.device_list = QListWidget()
+        self.device_list.setObjectName("deviceList")
+        self.device_list.itemDoubleClicked.connect(self._add_peer)
         left = QVBoxLayout()
-        left.addWidget(QLabel("Devices"))
-        self.devices = QListWidget()
-        self.devices.itemDoubleClicked.connect(self._add_peer)
-        left.addWidget(self.devices)
+        left.addLayout(_section("DISCOVERED DEVICES", self.device_list))
 
-        # right
+        # ─ Right column
         right = QVBoxLayout()
-        right.addWidget(QLabel("Targets"))
-        self.targets = QListWidget()
-        self.targets.itemDoubleClicked.connect(self._remove_peer)
-        right.addWidget(self.targets)
+        right.setSpacing(16)
 
-        right.addWidget(QLabel("Files"))
-        self.files = QListWidget()
-        right.addWidget(self.files)
+        # Targets
+        self.target_list = QListWidget()
+        self.target_list.setObjectName("targetList")
+        self.target_list.itemDoubleClicked.connect(self._remove_peer)
+        right.addLayout(_section("SEND TO", self.target_list))
 
-        btn_file = QPushButton("Add Files")
-        btn_file.clicked.connect(self._pick_files)
-        right.addWidget(btn_file)
+        # Files
+        self.file_list = QListWidget()
+        self.file_list.setObjectName("fileList")
+        file_section = _section("FILES", self.file_list)
 
-        right.addWidget(QLabel("Progress"))
-        self.progress_panel = ProgressPanel(self.state)
-        right.addWidget(self.progress_panel)
+        btn_add_files = QPushButton("＋  Add Files")
+        btn_add_files.setObjectName("toolBtn")
+        btn_add_files.clicked.connect(self._pick_files)
+        file_section.addWidget(btn_add_files)
+        right.addLayout(file_section)
 
-        body.addLayout(left,1)
-        body.addLayout(right,1)
+        # Progress
+        self.progress_panel = _ProgressPanel(self.state)
+        right.addLayout(_section("PROGRESS", self.progress_panel))
+
+        body.addLayout(left, 1)
+        body.addLayout(right, 1)
         return body
 
-    # ---------------- BOTTOM ----------------
+    # ── Footer ──────────────────────────────────────────
 
-    def _bottom(self):
-        layout = QHBoxLayout()
-        layout.addStretch()
+    def _build_footer(self) -> QHBoxLayout:
+        foot = QHBoxLayout()
+        foot.addStretch()
 
         self.send_btn = QPushButton("Send")
+        self.send_btn.setObjectName("sendBtn")
         self.send_btn.setEnabled(False)
+        self.send_btn.setFixedWidth(160)
         self.send_btn.clicked.connect(self._send)
-        layout.addWidget(self.send_btn)
+        foot.addWidget(self.send_btn)
 
-        cont = QWidget()
-        cont.setLayout(layout)
-        return cont
+        return foot
 
-    # ---------------- STYLE ----------------
+    # ── Global stylesheet — Apple-inspired dark ────────
 
-    def _apply_style(self):
+    def _apply_global_style(self):
         self.setStyleSheet("""
-        QMainWindow { background:#0b0e12; color:#e6e9ee; }
-
-        QLabel { color:#e6e9ee; }
-
-        QPushButton {
-            background:#1c2128;
-            color:#e6e9ee;
-            border:1px solid #30363d;
-            padding:10px 18px;
-            border-radius:8px;
-        }
-        QPushButton:hover {
-            background:#2d333b;
-        }
-        QPushButton:disabled {
-            background:#2b3037;
-            color:#888;
+        /* ── Window ── */
+        QMainWindow {
+            background: #1c1c1e;
+            color: #e5e5ea;
         }
 
-        QListWidget {
-            background:#13171c;
-            color:#e6e9ee;
-            border:1px solid #30363d;
-            border-radius:8px;
+        /* ── Labels ── */
+        QLabel {
+            color: #e5e5ea;
+            font-size: 13px;
         }
 
+        /* ── Line edit ── */
         QLineEdit {
-            background:#13171c;
-            color:#e6e9ee;
-            border:1px solid #30363d;
-            padding:8px;
-            border-radius:6px;
+            background: #2c2c2e;
+            color: #e5e5ea;
+            border: 1px solid #3a3a3c;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 13px;
+            selection-background-color: #0a84ff;
+        }
+        QLineEdit:focus {
+            border: 1px solid #0a84ff;
+        }
+
+        /* ── Lists ── */
+        QListWidget {
+            background: #2c2c2e;
+            color: #e5e5ea;
+            border: 1px solid #3a3a3c;
+            border-radius: 10px;
+            padding: 6px;
+            font-size: 13px;
+            outline: none;
+        }
+        QListWidget::item {
+            padding: 10px 12px;
+            border-radius: 6px;
+            margin: 2px 0;
+        }
+        QListWidget::item:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+        QListWidget::item:selected {
+            background: rgba(10, 132, 255, 0.25);
+            color: #ffffff;
+        }
+
+        /* ── Scroll bars ── */
+        QScrollBar:vertical {
+            background: transparent;
+            width: 6px;
+            margin: 4px 0;
+        }
+        QScrollBar::handle:vertical {
+            background: #48484a;
+            border-radius: 3px;
+            min-height: 30px;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0;
+        }
+        QScrollBar:horizontal {
+            height: 0;
+        }
+
+        /* ── Tool buttons ── */
+        QPushButton#toolBtn {
+            background: #2c2c2e;
+            color: #e5e5ea;
+            border: 1px solid #3a3a3c;
+            padding: 8px 18px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+        QPushButton#toolBtn:hover {
+            background: #3a3a3c;
+            border-color: #48484a;
+        }
+        QPushButton#toolBtn:pressed {
+            background: #1c1c1e;
+        }
+
+        /* ── Send button ── */
+        QPushButton#sendBtn {
+            background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                stop:0 #0a84ff, stop:1 #0070e0);
+            color: #ffffff;
+            border: none;
+            padding: 12px 32px;
+            border-radius: 10px;
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+        QPushButton#sendBtn:hover {
+            background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                stop:0 #3a9fff, stop:1 #0a84ff);
+        }
+        QPushButton#sendBtn:pressed {
+            background: #005ec4;
+        }
+        QPushButton#sendBtn:disabled {
+            background: #2c2c2e;
+            color: #636366;
+        }
+
+        /* ── Progress bar (base) ── */
+        QProgressBar {
+            background: #3a3a3c;
+            border: none;
+            border-radius: 3px;
+        }
+        QProgressBar::chunk {
+            background: #0a84ff;
+            border-radius: 3px;
+        }
+
+        /* ── Progress row card ── */
+        QFrame#progressRow {
+            background: #2c2c2e;
+            border-radius: 8px;
+        }
+
+        /* ── Message boxes ── */
+        QMessageBox {
+            background: #1c1c1e;
+            color: #e5e5ea;
+        }
+        QMessageBox QLabel {
+            color: #e5e5ea;
+            font-size: 13px;
+        }
+        QMessageBox QPushButton {
+            background: #2c2c2e;
+            color: #e5e5ea;
+            border: 1px solid #3a3a3c;
+            padding: 8px 20px;
+            border-radius: 8px;
+            min-width: 80px;
+        }
+        QMessageBox QPushButton:hover {
+            background: #3a3a3c;
         }
         """)
 
-    # =====================================================
-    # LOGIC
-    # =====================================================
+    # ════════════════════════════════════════════════════
+    #  Logic
+    # ════════════════════════════════════════════════════
 
     @pyqtSlot()
     def _on_name(self):
         self.state.cfg.device_name = self.name_edit.text().strip()
         self.state.cfg.save()
 
-    def _on_status(self, s):
+    def _on_status(self, s: AppStatus):
         self.state.set_status(s)
 
     def _pick_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "Choose Folder")
+        d = QFileDialog.getExistingDirectory(self, "Choose download folder")
         if d:
             self.state.cfg.download_dir = d
             self.state.cfg.save()
 
     def _pick_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select Files")
-        self.state.selected_files = files
-        self.refresh_lists()
+        files, _ = QFileDialog.getOpenFileNames(self, "Select files to send")
+        if files:
+            self.state.selected_files = files
+            self._refresh_lists()
 
     def _add_peer(self):
-        item = self.devices.currentItem()
+        item = self.device_list.currentItem()
         if not item:
             return
-        dev_id = item.text().split()[0]
-        if dev_id not in self.state.selected_device_ids:
-            dev = self.state.devices.get(dev_id)
-            if dev and dev.status == AppStatus.AVAILABLE:
-                self.state.selected_device_ids.append(dev_id)
-        self.refresh_lists()
+        dev_id = item.data(Qt.ItemDataRole.UserRole)
+        if not dev_id:
+            return
+        dev = self.state.devices.get(dev_id)
+        if dev and dev.status == AppStatus.AVAILABLE and dev_id not in self.state.selected_device_ids:
+            self.state.selected_device_ids.append(dev_id)
+        self._refresh_lists()
 
     def _remove_peer(self):
-        item = self.targets.currentItem()
+        item = self.target_list.currentItem()
         if not item:
             return
-        dev_id = item.text().split()[0]
-        if dev_id in self.state.selected_device_ids:
+        dev_id = item.data(Qt.ItemDataRole.UserRole)
+        if dev_id and dev_id in self.state.selected_device_ids:
             self.state.selected_device_ids.remove(dev_id)
-        self.refresh_lists()
+        self._refresh_lists()
 
-    # SEND
+    # ── Send ────────────────────────────────────────────
+
     @pyqtSlot()
     def _send(self):
+        if not self.state.selected_files or not self.state.selected_device_ids:
+            return
         self.send_btn.setEnabled(False)
         threading.Thread(target=self._do_send, daemon=True).start()
 
     def _do_send(self):
-        for dev_id in list(self.state.selected_device_ids):
-            if dev_id in self.state.devices:
-                self.transfer.send_to(self.state.devices[dev_id], self.state.selected_files)
+        try:
+            for dev_id in list(self.state.selected_device_ids):
+                dev = self.state.devices.get(dev_id)
+                if dev:
+                    self.transfer.send_to(dev, list(self.state.selected_files))
+        finally:
+            # Re-enable button from the GUI thread
+            QApplication.instance().postEvent(
+                self, _InvokeEvent(self._after_send)
+            )
 
-        QApplication.instance().postEvent(self, _InvokeEvent(lambda: self.send_btn.setEnabled(True)))
+    def _after_send(self):
+        self._refresh_lists()  # will re-evaluate send_btn enabled state
 
-    # REFRESH
+    # ── Refresh ─────────────────────────────────────────
+
     @pyqtSlot()
-    def refresh_ui(self):
-        self.refresh_lists()
-        self.progress_panel.update(self.state)
+    def _refresh_ui(self):
+        self._refresh_lists()
+        devices_snap = self.state.snapshot_devices()
+        progress_snap = self.state.snapshot_progress()
+        self.progress_panel.refresh(progress_snap, devices_snap)
 
-    def refresh_lists(self):
-        self.devices.clear()
-        for dev_id, dev in self.state.devices.items():
-            self.devices.addItem(f"{dev_id} {dev.name} {STATUS_DOT[dev.status]}")
+    def _refresh_lists(self):
+        # Devices
+        self.device_list.clear()
+        devices_snap = self.state.snapshot_devices()
+        for dev_id, dev in devices_snap.items():
+            dot = "🟢" if dev.status == AppStatus.AVAILABLE else "🔴"
+            item = QListWidgetItem(f"{dot}   {dev.name}   ({dev.host})")
+            item.setData(Qt.ItemDataRole.UserRole, dev_id)
+            self.device_list.addItem(item)
 
-        self.targets.clear()
+        # Targets
+        self.target_list.clear()
         for dev_id in self.state.selected_device_ids:
-            dev = self.state.devices.get(dev_id)
+            dev = devices_snap.get(dev_id)
             if dev:
-                self.targets.addItem(f"{dev_id} {dev.name}")
+                item = QListWidgetItem(f"➤  {dev.name}   ({dev.host})")
+                item.setData(Qt.ItemDataRole.UserRole, dev_id)
+                self.target_list.addItem(item)
 
-        self.files.clear()
-        for f in self.state.selected_files:
-            self.files.addItem(f)
+        # Files
+        self.file_list.clear()
+        for path in self.state.selected_files:
+            name = os.path.basename(path)
+            size = _human_size(os.path.getsize(path)) if os.path.isfile(path) else "?"
+            self.file_list.addItem(f"📄  {name}  ({size})")
 
-        # ACTIVATE SEND ONLY IF VALID
-        ok_files = len(self.state.selected_files) > 0
-        ok_peers = len(self.state.selected_device_ids) > 0
-        self.send_btn.setEnabled(ok_files and ok_peers)
+        # Send button state
+        can_send = bool(self.state.selected_files) and bool(self.state.selected_device_ids)
+        self.send_btn.setEnabled(can_send)
 
-    # HISTORY
+    # ── History ─────────────────────────────────────────
+
     def _show_history(self):
         if self.history:
             HistoryWindow(self.history, self).exec()
 
-    # EVENTS
-    def event(self, e):
+    # ── Qt event handling ───────────────────────────────
+
+    def event(self, e: QEvent) -> bool:
         if isinstance(e, _InvokeEvent):
-            e.performAction()
+            e.run()
             return True
-        if isinstance(e, _TransferRequestEvent):
-            self._incoming(e)
+        if isinstance(e, TransferRequestEvent):
+            self._on_incoming(e)
             return True
         return super().event(e)
 
-    def _incoming(self, event):
-        mb = event.total_size / (1024 * 1024)
-        msg = f"{event.peer_name} wants to send {event.num_files} file(s)\nSize: {mb:.2f} MB\nAccept?"
-        reply = QMessageBox.question(self, "Incoming Transfer", msg,
-                                     QMessageBox.StandardButton.Yes |
-                                     QMessageBox.StandardButton.No)
-        event.result["accepted"] = (reply == QMessageBox.StandardButton.Yes)
-        event.result["decided"] = True
+    def _on_incoming(self, ev: TransferRequestEvent):
+        size_str = _human_size(ev.total_size)
+        msg = (
+            f"{ev.peer_name} wants to send {ev.num_files} file(s)\n"
+            f"Total size: {size_str}\n\nAccept?"
+        )
+        reply = QMessageBox.question(
+            self,
+            "Incoming Transfer",
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        ev.result["accepted"] = reply == QMessageBox.StandardButton.Yes
+        ev.result["decided"] = True
 
 
-# Custom event
+# ── Invoke event (run a callback on the GUI thread) ────
+
+
 class _InvokeEvent(QEvent):
-    TYPE = QEvent.Type(QEvent.registerEventType())
+    _TYPE = QEvent.Type(QEvent.registerEventType())
 
-    def __init__(self, cb):
-        super().__init__(self.TYPE)
-        self.cb = cb
+    def __init__(self, fn):
+        super().__init__(self._TYPE)
+        self._fn = fn
 
-    def performAction(self):
-        self.cb()
+    def run(self):
+        self._fn()

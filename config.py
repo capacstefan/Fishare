@@ -1,9 +1,10 @@
-import os
-import logging
-from dataclasses import dataclass, asdict
-from logging.handlers import RotatingFileHandler
-import json
+"""Application configuration, storage, and logging setup."""
 
+import json
+import logging
+import os
+from dataclasses import asdict, dataclass
+from logging.handlers import RotatingFileHandler
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(APP_ROOT, "Data")
@@ -16,25 +17,32 @@ HISTORY_FILE = os.path.join(DATA_DIR, "transfer_history.json")
 
 
 class Storage:
+    """Simple JSON file-backed storage."""
+
     @staticmethod
     def load(defaults: dict) -> dict:
         if not os.path.exists(CONFIG_FILE):
             return defaults
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.loads(f)
+                data = json.load(f)  # FIX: was json.loads(f) — file object, not string
                 return {**defaults, **data}
         except Exception:
             return defaults
 
     @staticmethod
     def save(obj) -> None:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(asdict(obj), f, indent=2)
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(asdict(obj), f, indent=2)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Failed to save config: {e}")
 
 
 @dataclass
 class Config:
+    """Persistent application configuration."""
+
     device_name: str = os.getenv("COMPUTERNAME", "FIshare")[:32]
     download_dir: str = os.path.join(os.path.expanduser("~"), "Downloads", "FIshare")
     allow_incoming: bool = True
@@ -42,7 +50,7 @@ class Config:
     discovery_port: int = 49221
 
     @staticmethod
-    def load():
+    def load() -> "Config":
         cfg = Config(**Storage.load(Config().__dict__))
         try:
             os.makedirs(cfg.download_dir, exist_ok=True)
@@ -55,16 +63,21 @@ class Config:
 
 
 def setup_logging():
+    """Configure root logger with console + rotating file handlers."""
     fmt = logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s")
-
     root = logging.getLogger()
     root.setLevel(logging.INFO)
 
+    # Avoid duplicate handlers on repeated calls
+    if any(isinstance(h, RotatingFileHandler) for h in root.handlers):
+        return
+
     ch = logging.StreamHandler()
     ch.setFormatter(fmt)
-    fh = RotatingFileHandler(LOG_FILE, maxBytes=5_000_000, backupCount=5, encoding="utf-8")
-    fh.setFormatter(fmt)
+    root.addHandler(ch)
 
-    if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):
-        root.addHandler(ch)
-        root.addHandler(fh)
+    fh = RotatingFileHandler(
+        LOG_FILE, maxBytes=5_000_000, backupCount=5, encoding="utf-8"
+    )
+    fh.setFormatter(fmt)
+    root.addHandler(fh)

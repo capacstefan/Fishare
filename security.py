@@ -1,19 +1,21 @@
+"""Cryptographic identity and AEAD stream for secure transfers."""
+
 import os
+
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from config import KEY_FILE, DATA_DIR
+from config import DATA_DIR, KEY_FILE
 
 
 class AEADStream:
-    """Simple AEAD stream (ChaCha20-Poly1305) with incremental nonce."""
+    """ChaCha20-Poly1305 AEAD stream with incremental nonce."""
 
     def __init__(self, key: bytes):
         self._aead = ChaCha20Poly1305(key)
@@ -34,27 +36,35 @@ class AEADStream:
         return self._aead.decrypt(nonce, data, b"FIshare")
 
 
-def key_agree(sock, sign_func, peer_pub=None) -> AEADStream:
-    """Performs ephemeral ECDH with signed public key exchange.
+def _recv_exact(sock, n: int) -> bytes:
+    """Read exactly *n* bytes from *sock*, or raise ConnectionError."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("peer closed connection during handshake")
+        buf.extend(chunk)
+    return bytes(buf)
 
-    If peer_pub is provided, verify the peer's signature against that public key
-    (basic pinning). Otherwise, signatures are exchanged but not verified.
+
+def key_agree(sock, sign_func, peer_pub=None) -> AEADStream:
+    """Ephemeral ECDH key-agreement with signed public keys.
+
+    Uses _recv_exact to guarantee full reads (fixes partial-recv bug).
     """
     my_priv = X25519PrivateKey.generate()
     my_pub_bytes = my_priv.public_key().public_bytes_raw()
 
-    # sign our ephemeral key
     sig = sign_func(my_pub_bytes)
     sock.sendall(len(my_pub_bytes).to_bytes(2, "big") + my_pub_bytes)
     sock.sendall(len(sig).to_bytes(2, "big") + sig)
 
-    # receive peer ephemeral pub + sig
-    plen = int.from_bytes(sock.recv(2), "big")
-    peer_pub_bytes = sock.recv(plen)
-    slen = int.from_bytes(sock.recv(2), "big")
-    peer_sig = sock.recv(slen)
+    # Receive peer ephemeral pub + sig (exact reads)
+    plen = int.from_bytes(_recv_exact(sock, 2), "big")
+    peer_pub_bytes = _recv_exact(sock, plen)
+    slen = int.from_bytes(_recv_exact(sock, 2), "big")
+    peer_sig = _recv_exact(sock, slen)
 
-    # verify signature if peer_pub provided (pinning)
     if peer_pub:
         ed25519.Ed25519PublicKey.from_public_bytes(peer_pub).verify(
             peer_sig, peer_pub_bytes
@@ -63,7 +73,6 @@ def key_agree(sock, sign_func, peer_pub=None) -> AEADStream:
     peer_key = X25519PublicKey.from_public_bytes(peer_pub_bytes)
     shared = my_priv.exchange(peer_key)
 
-    # derive session key
     key = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
@@ -75,7 +84,7 @@ def key_agree(sock, sign_func, peer_pub=None) -> AEADStream:
 
 
 class Identity:
-    """Persistent Ed25519 identity for signing ephemeral keys."""
+    """Persistent Ed25519 signing identity."""
 
     def __init__(self):
         self._priv = None

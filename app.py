@@ -1,11 +1,14 @@
+"""FIshare — local network file sharing application."""
+
 import sys
+
 from PyQt6.QtWidgets import QApplication
 
-from config import setup_logging, Config
-from state import AppState
-from network import Advertiser, Scanner
-from main_window import FIshareQtApp
+from config import Config, setup_logging
 from history import TransferHistory
+from main_window import FIshareQtApp
+from network import Advertiser, Scanner
+from state import AppState
 
 
 def main():
@@ -27,12 +30,10 @@ def main():
     try:
         ret = app.exec()
     finally:
-        try:
-            window.transfer.stop()
-        except Exception:
-            pass
+        window.transfer.stop()
         advertiser.stop()
         scanner.stop()
+
     sys.exit(ret)
 
 
