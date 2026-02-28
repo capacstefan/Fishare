@@ -28,6 +28,7 @@ class Device:
     port: int
     status: AppStatus
     last_seen: float = field(default_factory=time.time)
+    protocols: list = field(default_factory=list)  # Phase 2: supported protocols
 
 
 class AppState:
@@ -77,6 +78,25 @@ class AppState:
             self.selected_device_ids = [
                 d for d in self.selected_device_ids if d in self.devices
             ]
+    
+    def cleanup_stale_transfers(self, timeout_seconds: float = 300.0):
+        """Clean up transfers that have been stale for too long.
+        
+        This is a safety mechanism for transfers that failed to call clear_progress().
+        """
+        with self._lock:
+            now = time.time()
+            stale = []
+            for dev_id in self._active_transfers:
+                start_time = self.transfer_start_times.get(dev_id)
+                if start_time and (now - start_time) > timeout_seconds:
+                    progress = self.progress.get(dev_id, 0.0)
+                    # Only clean if not at 100% (completed transfers cleanup themselves)
+                    if progress < 0.99:
+                        stale.append(dev_id)
+            
+            for dev_id in stale:
+                self.clear_progress(dev_id)
 
     # ── Transfer progress ───────────────────────────────
 
@@ -88,6 +108,11 @@ class AppState:
             self.transfer_bytes[device_id] = 0
             self.transfer_speeds[device_id] = 0.0
             self.transfer_status[device_id] = TransferStatus.COMPLETED
+
+    def is_transfer_active(self, device_id: str) -> bool:
+        """Return True if there is already an ongoing transfer for this device."""
+        with self._lock:
+            return device_id in self._active_transfers
 
     def update_progress(self, device_id: str, ratio: float, bytes_transferred: int = 0):
         with self._lock:

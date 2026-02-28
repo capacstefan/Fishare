@@ -10,12 +10,28 @@ import time
 from typing import List
 
 from history import TransferRecord
-from security import Identity, key_agree
+from protocols import ProtocolSelector
+from security import Identity
 from state import AppStatus, Device, TransferStatus
 
 LOG = logging.getLogger(__name__)
 
 MCAST_GRP = "239.255.42.99"
+
+# Singleton Identity instance
+_identity_instance = None
+_identity_lock = threading.Lock()
+
+
+def get_identity() -> Identity:
+    """Get or create singleton Identity instance."""
+    global _identity_instance
+    if _identity_instance is None:
+        with _identity_lock:
+            if _identity_instance is None:
+                _identity_instance = Identity()
+                _identity_instance.load_or_create()
+    return _identity_instance
 
 
 # ── Helpers ─────────────────────────────────────────────
@@ -52,56 +68,15 @@ def _make_mcast_send() -> socket.socket:
     return s
 
 
-# ── Framed protocol ────────────────────────────────────
-
-
-class Proto:
-    """Length-prefixed JSON messages with optional AEAD encryption."""
-
-    HEADER_LEN = 4
-
-    @staticmethod
-    def send_json(sock: socket.socket, obj: dict, aead=None):
-        data = json.dumps(obj).encode("utf-8")
-        if aead:
-            data = aead.encrypt(data)
-        sock.sendall(struct.pack(">I", len(data)) + data)
-
-    @staticmethod
-    def recv_json(sock: socket.socket, aead=None) -> dict:
-        header = Proto._recvall(sock, Proto.HEADER_LEN)
-        if header is None:
-            raise ConnectionError("peer closed connection")
-        (length,) = struct.unpack(">I", header)
-        if length > 100 * 1024 * 1024:  # sanity: 100 MB frame limit
-            raise ValueError(f"frame too large: {length}")
-        data = Proto._recvall(sock, length)
-        if data is None:
-            raise ConnectionError("peer closed mid-frame")
-        if aead:
-            data = aead.decrypt(data)
-        return json.loads(data.decode("utf-8"))
-
-    @staticmethod
-    def _recvall(sock: socket.socket, n: int):
-        """Read exactly *n* bytes or return None on EOF."""
-        buf = bytearray()
-        while len(buf) < n:
-            chunk = sock.recv(n - len(buf))
-            if not chunk:
-                return None  # peer closed
-            buf.extend(chunk)
-        return bytes(buf)
-
-
 # ── Discovery ──────────────────────────────────────────
 
 
 class Advertiser:
-    """Periodically multicast this device's availability."""
+    """Periodically multicast this device's availability and protocol support."""
 
-    def __init__(self, state):
+    def __init__(self, state, protocol_selector):
         self.state = state
+        self.protocol_selector = protocol_selector
         self._stop = threading.Event()
         self._sock = _make_mcast_send()
         self._interval = 1.5
@@ -120,12 +95,19 @@ class Advertiser:
         cfg = self.state.cfg
         while not self._stop.is_set():
             try:
+                # Include protocol capabilities in advertisement
+                capabilities = [
+                    cap.to_dict() 
+                    for cap in self.protocol_selector.get_capabilities()
+                ]
+                
                 payload = json.dumps({
                     "type": "fishare_adv",
                     "name": cfg.device_name,
                     "host": _get_local_ip(),
                     "port": cfg.listen_port,
                     "status": self.state.status.value,
+                    "protocols": capabilities,  # Phase 2: advertise protocol support
                 }).encode("utf-8")
                 self._sock.sendto(payload, (MCAST_GRP, cfg.discovery_port))
             except Exception as e:
@@ -154,8 +136,11 @@ class Scanner:
             pass
 
     def _gc(self):
+        """Periodic cleanup of stale devices and transfers."""
         while not self._stop.is_set():
             self.state.prune_devices(ttl_seconds=6.0)
+            # Also cleanup stale transfers (safety mechanism)
+            self.state.cleanup_stale_transfers(timeout_seconds=300.0)
             self._stop.wait(2)
 
     def _listen(self):
@@ -187,15 +172,29 @@ class Scanner:
                     if raw in {s.value for s in AppStatus}
                     else AppStatus.BUSY
                 )
-                self.state.upsert_device(
-                    Device(
-                        device_id=f"{adv_host}:{adv_port}",
-                        name=payload.get("name", "Unknown"),
-                        host=adv_host,
-                        port=adv_port,
-                        status=status,
-                    )
+                
+                # Phase 2: Parse protocol capabilities
+                from protocols import ProtocolCapabilities
+                protocol_data = payload.get("protocols", [])
+                protocols = []
+                for p in protocol_data:
+                    try:
+                        cap = ProtocolCapabilities.from_dict(p)
+                        if cap:
+                            protocols.append(cap)
+                    except Exception as e:
+                        LOG.debug(f"Failed to parse protocol capability: {e}")
+                
+                device = Device(
+                    device_id=f"{adv_host}:{adv_port}",
+                    name=payload.get("name", "Unknown"),
+                    host=adv_host,
+                    port=adv_port,
+                    status=status,
                 )
+                device.protocols = protocols  # Store supported protocols
+                self.state.upsert_device(device)
+                
             except Exception as e:
                 LOG.debug(f"Scan parse error: {e}")
 
@@ -218,41 +217,80 @@ class TransferRequestEvent(QEvent):
         self.result = result
 
 
-# ── Transfer service ───────────────────────────────────
+# ── Transfer service (Phase 1 & 2 integrated) ──────────
 
 
 class TransferService:
-    """Incoming (server) and outgoing (client) file transfers."""
+    """Protocol-agnostic file transfer service.
+    
+    Phase 1: Uses optimized TCP by default
+    Phase 2: Automatically selects QUIC when available
+    Phase 3: Ready for C++ crypto replacement
+    
+    Features:
+    - Automatic protocol selection (QUIC → TCP fallback)
+    - Multi-protocol server (TCP + QUIC simultaneously)
+    - Progress tracking
+    - Transfer history
+    """
 
     MAX_RETRIES = 3
-    CHUNK_SIZE = 64 * 1024  # 64 KiB
-    ACCEPT_TIMEOUT = 30.0   # seconds to wait for user decision
+    ACCEPT_TIMEOUT = 30.0
 
     def __init__(self, state, ui_root=None, history=None):
         self.state = state
         self.ui_root = ui_root
         self.history = history
-        self.identity = Identity()
-        self.identity.load_or_create()
-        self._stop = threading.Event()
-        self._server_sock: socket.socket | None = None
-        threading.Thread(
-            target=self._server_loop, daemon=True, name="rx-server"
-        ).start()
+        
+        # Use singleton identity
+        self.identity = get_identity()
+        
+        self.protocol_selector = ProtocolSelector(self.identity, state.cfg)
+        
+        # Start all available protocol servers
+        self._servers = []
+        self._start_all_servers()
+        
+        # Validate at least one server started
+        if not self._servers:
+            raise RuntimeError(
+                "Failed to start any transfer protocol servers! "
+                "Cannot receive files."
+            )
+
+    def _start_all_servers(self):
+        """Start servers for all available protocols."""
+        for protocol in self.protocol_selector.get_protocols():
+            try:
+                if protocol.start_server(self._handle_incoming_transfer):
+                    self._servers.append(protocol)
+                    LOG.info(f"Started {protocol.capabilities.name.value} server")
+                else:
+                    LOG.warning(
+                        f"Failed to start {protocol.capabilities.name.value} server"
+                    )
+            except Exception as e:
+                LOG.error(
+                    f"Exception starting {protocol.capabilities.name.value}: {e}",
+                    exc_info=True
+                )
 
     def stop(self):
-        self._stop.set()
-        # Close the server socket to unblock accept()
-        if self._server_sock:
+        """Stop all protocol servers."""
+        for protocol in self._servers:
             try:
-                self._server_sock.close()
+                protocol.stop_server()
             except Exception:
                 pass
 
     # ── Accept / reject prompt ──────────────────────────
 
     def _ask_user_accept(self, peer_name: str, num_files: int, total_size: int) -> bool:
-        """Ask user to accept incoming transfer (thread-safe via Qt event)."""
+        """Ask user to accept incoming transfer (thread-safe via Qt event).
+        
+        Uses event posting to avoid blocking workers with modal dialogs.
+        Returns False on timeout or if user is busy.
+        """
         if self.state.status == AppStatus.BUSY:
             return False
         if not self.ui_root:
@@ -262,223 +300,142 @@ class TransferService:
         event = TransferRequestEvent(peer_name, num_files, total_size, result)
 
         from PyQt6.QtWidgets import QApplication
-        QApplication.instance().postEvent(self.ui_root, event)
+        app = QApplication.instance()
+        if not app:
+            LOG.warning("No QApplication instance, auto-accepting transfer")
+            return True
+        
+        app.postEvent(self.ui_root, event)
 
-        # Wait for the GUI thread to set result["decided"]
+        # Wait with shorter intervals for faster response
         deadline = time.time() + self.ACCEPT_TIMEOUT
         while time.time() < deadline:
             if "decided" in result:
                 return result.get("accepted", False)
-            time.sleep(0.1)
+            time.sleep(0.05)  # 50ms instead of 100ms
 
-        return False  # timeout → reject
+        LOG.warning(f"Transfer acceptance timeout for {peer_name}")
+        return False
 
-    # ── Receiver (server) ───────────────────────────────
+    # ── Incoming transfer handler ───────────────────────
 
-    def _server_loop(self):
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.settimeout(1.0)
-        srv.bind(("", self.state.cfg.listen_port))
-        srv.listen(16)
-        self._server_sock = srv
-        LOG.info(f"Receiver listening on port {self.state.cfg.listen_port}")
+    def _handle_incoming_transfer(self, conn_info, files, total_size):
+        """Handle incoming transfer request.
+        
+        Returns tuple: (accepted, state, history, start_time)
+        This pattern is cleaner than mutating conn_info.
+        """
+        peer_name = conn_info.get("peer_name", "Unknown")
+        dev_id = conn_info.get("dev_id")
+        
+        # Ask user
+        accepted = self._ask_user_accept(peer_name, len(files), total_size)
+        if not accepted:
+            LOG.info(f"Transfer from {peer_name} rejected")
+            return (False, None, None, time.time())
+        
+        # Track transfer start
+        self.state.start_transfer(dev_id)
+        start_time = time.time()
+        
+        # Return tuple instead of mutating dict
+        return (True, self.state, self.history, start_time)
 
-        while not self._stop.is_set():
-            try:
-                conn, addr = srv.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                if self._stop.is_set():
-                    break
-                continue
-            # Set a generous per-connection timeout so a stalled peer can't
-            # block the handler thread forever.
-            conn.settimeout(120.0)
-            threading.Thread(
-                target=self._handle_peer, args=(conn, addr), daemon=True
-            ).start()
-
-        srv.close()
-
-    def _handle_peer(self, conn: socket.socket, addr):
-        dev_id = addr[0]
-        with conn:
-            try:
-                aead = key_agree(conn, self.identity.sign)
-                req = Proto.recv_json(conn, aead)
-
-                if req.get("type") != "send_request":
-                    LOG.warning(f"Unknown request type from {addr}")
-                    return
-
-                files = req.get("files", [])
-                total = int(req.get("total", 0))
-                peer_name = req.get("peer_name", "Unknown")
-
-                accepted = self._ask_user_accept(peer_name, len(files), total)
-                Proto.send_json(conn, {"accept": bool(accepted)}, aead)
-                if not accepted:
-                    LOG.info(f"Transfer rejected from {peer_name}")
-                    return
-
-                # ── receive files ──
-                self.state.start_transfer(dev_id)
-                start_time = time.time()
-                received_total = 0
-
-                for _rel in files:
-                    hdr = Proto.recv_json(conn, aead)
-                    fname = os.path.basename(hdr.get("file", "unnamed"))
-                    size = int(hdr.get("size", 0))
-                    dest = os.path.join(self.state.cfg.download_dir, fname)
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    LOG.info(f"Receiving: {fname} ({size} bytes)")
-
-                    with open(dest, "wb") as f:
-                        remaining = size
-                        while remaining > 0:
-                            msg = Proto.recv_json(conn, aead)
-                            data = msg.get("data", "").encode("latin1")
-                            f.write(data)
-                            received_total += len(data)
-                            remaining -= len(data)
-                            if total > 0:
-                                self.state.update_progress(
-                                    dev_id, received_total / total, received_total
-                                )
-
-                duration = time.time() - start_time
-                self.state.update_progress(dev_id, 1.0, received_total)
-                LOG.info(f"Received {len(files)} file(s) from {peer_name}")
-
-                self._record(
-                    start_time, "received", peer_name, dev_id,
-                    len(files), total, duration, TransferStatus.COMPLETED,
-                )
-
-            except Exception as e:
-                LOG.error(f"Receive error from {addr}: {e}", exc_info=True)
-                self.state.set_transfer_status(dev_id, TransferStatus.ERROR)
-            finally:
-                # Delay clearing so the UI can flash 100% / error briefly
-                threading.Timer(
-                    2.0, self.state.clear_progress, args=(dev_id,)
-                ).start()
-
-    # ── Sender (client) ─────────────────────────────────
+    # ── Outgoing transfer (sender) ──────────────────────
 
     def send_to(self, device: Device, files: List[str]) -> bool:
-        """Send files to a single peer device. Returns True on success."""
-        # Pre-validate files exist
+        """Send files using best available protocol.
+        
+        Phase 2: Tries QUIC first, fallbacks to TCP if needed.
+        """
         valid_files = [p for p in files if os.path.isfile(p)]
         if not valid_files:
-            LOG.warning("No valid files to send.")
+            LOG.warning("No valid files to send")
             return False
 
-        total = sum(os.path.getsize(p) for p in valid_files)
+        # Ensure device still exists (race condition guard)
+        if device.device_id not in self.state.devices:
+            LOG.warning(f"Device {device.name} no longer available")
+            return False
+
+        # Prevent state corruption from concurrent sends to the same device
+        if self.state.is_transfer_active(device.device_id):
+            LOG.warning(f"Transfer already in progress to {device.name}, ignoring duplicate")
+            return False
+
+        total_size = sum(os.path.getsize(p) for p in valid_files)
         start_time = time.time()
 
+        # Select best protocol for this peer
+        peer_protocols = getattr(device, 'protocols', [])
+        protocol = self.protocol_selector.select_for_peer(peer_protocols)
+
+        if not protocol:
+            LOG.error("No compatible protocol found!")
+            return False
+
+        LOG.info(f"Using {protocol.capabilities.name.value} to send to {device.name}")
+
+        # Track progress
+        self.state.start_transfer(device.device_id)
+
+        def progress_cb(bytes_sent, total):
+            if total > 0:  # Guard: never divide by zero for empty file sets
+                self.state.update_progress(
+                    device.device_id, bytes_sent / total, bytes_sent
+                )
+
+        success = False
+        last_error = ""
+
+        # Try to send with retries
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
-                LOG.info(
-                    f"Connecting to {device.name} ({device.host}:{device.port}) "
-                    f"attempt {attempt}"
+                target_port = device.port + protocol.capabilities.port_offset
+                success = protocol.send_files(
+                    device.host,
+                    target_port,
+                    valid_files,
+                    progress_cb,
                 )
-                self.state.start_transfer(device.device_id)
 
-                with socket.create_connection(
-                    (device.host, device.port), timeout=10
-                ) as sock:
-                    sock.settimeout(120.0)
-                    aead = key_agree(sock, self.identity.sign)
-
-                    files_rel = [os.path.basename(p) for p in valid_files]
-                    Proto.send_json(
-                        sock,
-                        {
-                            "type": "send_request",
-                            "files": files_rel,
-                            "total": total,
-                            "peer_name": self.state.cfg.device_name,
-                        },
-                        aead,
-                    )
-
-                    resp = Proto.recv_json(sock, aead)
-                    if not resp.get("accept"):
-                        LOG.info(f"{device.name} refused the transfer.")
-                        self.state.set_transfer_status(
-                            device.device_id, TransferStatus.CANCELED
-                        )
-                        self.state.update_progress(device.device_id, 1.0, 0)
-                        self._record(
-                            start_time, "sent", device.name, device.host,
-                            len(valid_files), total,
-                            time.time() - start_time, TransferStatus.CANCELED,
-                            "Transfer rejected by recipient",
-                        )
-                        threading.Timer(
-                            2.0, self.state.clear_progress,
-                            args=(device.device_id,),
-                        ).start()
-                        return False
-
-                    # ── send files ──
-                    sent_total = 0
-                    for path in valid_files:
-                        fname = os.path.basename(path)
-                        size = os.path.getsize(path)
-                        Proto.send_json(sock, {"file": fname, "size": size}, aead)
-
-                        with open(path, "rb") as f:
-                            while True:
-                                chunk = f.read(self.CHUNK_SIZE)
-                                if not chunk:
-                                    break
-                                Proto.send_json(
-                                    sock, {"data": chunk.decode("latin1")}, aead
-                                )
-                                sent_total += len(chunk)
-                                if total > 0:
-                                    self.state.update_progress(
-                                        device.device_id,
-                                        sent_total / total,
-                                        sent_total,
-                                    )
-
+                if success:
                     duration = time.time() - start_time
-                    self.state.update_progress(device.device_id, 1.0, sent_total)
-                    LOG.info(f"Transfer to {device.name} complete.")
-
+                    self.state.update_progress(device.device_id, 1.0, total_size)
+                    LOG.info(f"Transfer to {device.name} complete in {duration:.1f}s")
                     self._record(
                         start_time, "sent", device.name, device.host,
-                        len(valid_files), total, duration, TransferStatus.COMPLETED,
+                        len(valid_files), total_size, duration,
+                        TransferStatus.COMPLETED,
                     )
                     threading.Timer(
-                        2.0, self.state.clear_progress,
-                        args=(device.device_id,),
+                        2.0, self.state.clear_progress, args=(device.device_id,)
                     ).start()
                     return True
 
+                # send_files returned False (peer rejected / no exception)
+                last_error = "Transfer rejected or failed without exception"
+                LOG.warning(f"Attempt {attempt}: send returned False")
+
             except Exception as e:
-                LOG.warning(f"Send attempt {attempt} failed for {device.name}: {e}")
-                if attempt == self.MAX_RETRIES:
-                    self.state.set_transfer_status(
-                        device.device_id, TransferStatus.ERROR
-                    )
-                    self._record(
-                        start_time, "sent", device.name, device.host,
-                        len(valid_files), total,
-                        time.time() - start_time, TransferStatus.ERROR, str(e),
-                    )
-                    threading.Timer(
-                        2.0, self.state.clear_progress,
-                        args=(device.device_id,),
-                    ).start()
+                last_error = str(e)
+                LOG.warning(f"Attempt {attempt} failed: {e}")
+
+            # Wait between retries, but not after the last one
+            if attempt < self.MAX_RETRIES:
                 time.sleep(2)
 
+        # All attempts exhausted — record the failure
+        self.state.set_transfer_status(device.device_id, TransferStatus.ERROR)
+        self._record(
+            start_time, "sent", device.name, device.host,
+            len(valid_files), total_size,
+            time.time() - start_time,
+            TransferStatus.ERROR, last_error,
+        )
+        threading.Timer(
+            2.0, self.state.clear_progress, args=(device.device_id,)
+        ).start()
         return False
 
     # ── History helper ──────────────────────────────────

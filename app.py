@@ -17,7 +17,13 @@ def main():
     state = AppState(cfg)
     history = TransferHistory()
 
-    advertiser = Advertiser(state)
+    # Create protocol selector for advertisement (uses singleton Identity)
+    from network import get_identity
+    from protocols import ProtocolSelector
+    identity = get_identity()
+    protocol_selector = ProtocolSelector(identity, cfg)
+
+    advertiser = Advertiser(state, protocol_selector)
     scanner = Scanner(state)
     advertiser.start()
     scanner.start()

@@ -52,6 +52,10 @@ def key_agree(sock, sign_func, peer_pub=None) -> AEADStream:
 
     Uses _recv_exact to guarantee full reads (fixes partial-recv bug).
     """
+    # X25519 raw public key = 32 bytes; Ed25519 signature = 64 bytes (fixed sizes)
+    X25519_KEY_LEN = 32
+    ED25519_SIG_LEN = 64
+
     my_priv = X25519PrivateKey.generate()
     my_pub_bytes = my_priv.public_key().public_bytes_raw()
 
@@ -61,8 +65,13 @@ def key_agree(sock, sign_func, peer_pub=None) -> AEADStream:
 
     # Receive peer ephemeral pub + sig (exact reads)
     plen = int.from_bytes(_recv_exact(sock, 2), "big")
+    if plen != X25519_KEY_LEN:
+        raise ValueError(f"Unexpected key length from peer: {plen} (expected {X25519_KEY_LEN})")
     peer_pub_bytes = _recv_exact(sock, plen)
+
     slen = int.from_bytes(_recv_exact(sock, 2), "big")
+    if slen != ED25519_SIG_LEN:
+        raise ValueError(f"Unexpected signature length from peer: {slen} (expected {ED25519_SIG_LEN})")
     peer_sig = _recv_exact(sock, slen)
 
     if peer_pub:

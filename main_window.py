@@ -186,6 +186,7 @@ class _ProgressPanel(QWidget):
         scroll.setWidget(self._inner)
 
     def refresh(self, progress_snap: dict, devices_snap: dict):
+        """Update progress display, with stale row cleanup."""
         # Add / update rows
         for dev_id, ratio in progress_snap.items():
             if dev_id not in self.rows:
@@ -654,17 +655,32 @@ class FIshareQtApp(QMainWindow):
         return super().event(e)
 
     def _on_incoming(self, ev: TransferRequestEvent):
+        """Handle incoming transfer with auto-timeout dialog."""
         size_str = _human_size(ev.total_size)
         msg = (
             f"{ev.peer_name} wants to send {ev.num_files} file(s)\n"
             f"Total size: {size_str}\n\nAccept?"
         )
-        reply = QMessageBox.question(
-            self,
+        
+        # Create dialog with timeout
+        dialog = QMessageBox(
+            QMessageBox.Icon.Question,
             "Incoming Transfer",
             msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            self
         )
+        
+        # Auto-reject after 30 seconds (matching server timeout)
+        timeout_ms = 30000
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: dialog.reject())
+        timer.start(timeout_ms)
+        
+        reply = dialog.exec()
+        timer.stop()  # Cancel timer if user responded
+        
         ev.result["accepted"] = reply == QMessageBox.StandardButton.Yes
         ev.result["decided"] = True
 
