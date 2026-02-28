@@ -395,8 +395,17 @@ class TransferService:
         # Track progress
         self.state.start_transfer(device.device_id)
 
+        # first_byte flag: the start time recorded by start_transfer() includes
+        # connection setup and the user's Accept dialog think time.  We reset it
+        # on the first actual byte sent so the displayed speed reflects real
+        # network throughput, not "button-click-to-complete" elapsed time.
+        _speed_timer_reset = [False]
+
         def progress_cb(bytes_sent, total):
-            if total > 0:  # Guard: never divide by zero for empty file sets
+            if not _speed_timer_reset[0]:
+                _speed_timer_reset[0] = True
+                self.state.reset_transfer_start(device.device_id)
+            if total > 0:
                 self.state.update_progress(
                     device.device_id, bytes_sent / total, bytes_sent
                 )

@@ -109,6 +109,16 @@ class AppState:
             self.transfer_speeds[device_id] = 0.0
             self.transfer_status[device_id] = TransferStatus.COMPLETED
 
+    def reset_transfer_start(self, device_id: str):
+        """Reset the transfer start time to now.
+
+        Called by the sender on first byte sent, so the displayed speed
+        excludes connection setup and user think-time (Accept dialog).
+        """
+        with self._lock:
+            self.transfer_start_times[device_id] = time.time()
+            self.transfer_bytes[device_id] = 0
+
     def is_transfer_active(self, device_id: str) -> bool:
         """Return True if there is already an ongoing transfer for this device."""
         with self._lock:
