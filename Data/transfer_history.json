@@ -1,5 +1,27 @@
 [
   {
+    "timestamp": 1772285690.1344109,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 56,
+    "total_size": 149475548,
+    "duration": 4.5842437744140625,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1772285649.1289253,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 56,
+    "total_size": 149475548,
+    "duration": 7.617350101470947,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
     "timestamp": 1772284462.2283802,
     "direction": "sent",
     "peer_name": "DESKTOP-CU2U3RT",

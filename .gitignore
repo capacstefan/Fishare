@@ -12,9 +12,7 @@ venv/
 Data/fishare.log
 
 # Runtime / generated data
-Data/id_ed25519.pem
-Data/config.json
-Data/transfer_history.json
+Data/*
 Downloads/
 
 # OS noise

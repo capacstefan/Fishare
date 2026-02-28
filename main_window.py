@@ -353,12 +353,20 @@ class FIshareQtApp(QMainWindow):
         # Files
         self.file_list = QListWidget()
         self.file_list.setObjectName("fileList")
+        self.file_list.itemDoubleClicked.connect(self._remove_file)
         file_section = _section("FILES", self.file_list)
 
+        file_btn_row = QHBoxLayout()
+        file_btn_row.setSpacing(8)
         btn_add_files = QPushButton("＋  Add Files")
         btn_add_files.setObjectName("toolBtn")
         btn_add_files.clicked.connect(self._pick_files)
-        file_section.addWidget(btn_add_files)
+        btn_clear_files = QPushButton("✕  Clear All")
+        btn_clear_files.setObjectName("toolBtn")
+        btn_clear_files.clicked.connect(self._clear_files)
+        file_btn_row.addWidget(btn_add_files)
+        file_btn_row.addWidget(btn_clear_files)
+        file_section.addLayout(file_btn_row)
         right.addLayout(file_section)
 
         # Progress
@@ -557,8 +565,23 @@ class FIshareQtApp(QMainWindow):
     def _pick_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Select files to send")
         if files:
-            self.state.selected_files = files
+            # Append new files, deduplicated
+            existing = set(self.state.selected_files)
+            for f in files:
+                if f not in existing:
+                    self.state.selected_files.append(f)
+                    existing.add(f)
             self._refresh_lists()
+
+    def _remove_file(self, item: QListWidgetItem):
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path and path in self.state.selected_files:
+            self.state.selected_files.remove(path)
+        self._refresh_lists()
+
+    def _clear_files(self):
+        self.state.selected_files.clear()
+        self._refresh_lists()
 
     def _add_peer(self):
         item = self.device_list.currentItem()
@@ -638,7 +661,9 @@ class FIshareQtApp(QMainWindow):
         for path in self.state.selected_files:
             name = os.path.basename(path)
             size = _human_size(os.path.getsize(path)) if os.path.isfile(path) else "?"
-            self.file_list.addItem(f"📄  {name}  ({size})")
+            item = QListWidgetItem(f"📄  {name}  ({size})")
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            self.file_list.addItem(item)
 
         # Send button state
         can_send = bool(self.state.selected_files) and bool(self.state.selected_device_ids)
