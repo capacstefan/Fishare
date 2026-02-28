@@ -16,6 +16,7 @@ class TransferStatus(str, Enum):
     COMPLETED = "completed"
     ERROR = "error"
     CANCELED = "canceled"
+    REJECTED = "rejected"
 
 
 @dataclass

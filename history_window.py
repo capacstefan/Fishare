@@ -171,6 +171,7 @@ class HistoryWindow(QDialog):
             color_map = {
                 "completed": "#34c759",
                 "canceled": "#ff9f0a",
+                "rejected": "#ff9f0a",
                 "error": "#ff453a",
             }
             from PyQt6.QtGui import QColor

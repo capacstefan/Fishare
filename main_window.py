@@ -148,6 +148,11 @@ class _ProgressRow(QFrame):
             self.bar.setStyleSheet(
                 "QProgressBar::chunk { background: #ff9f0a; border-radius: 3px; }"
             )
+        elif status == TransferStatus.REJECTED:
+            self.lbl.setText(f"{name}  —  Rejected")
+            self.bar.setStyleSheet(
+                "QProgressBar::chunk { background: #ff9f0a; border-radius: 3px; }"
+            )
         elif status == TransferStatus.ERROR:
             self.lbl.setText(f"{name}  —  Error")
             self.bar.setStyleSheet(

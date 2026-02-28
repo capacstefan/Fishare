@@ -466,6 +466,7 @@ class TransferService:
                 )
 
         last_error = ""
+        was_rejected = False
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
@@ -492,6 +493,8 @@ class TransferService:
                     ).start()
                     return True
 
+                # send_files returns False when the peer explicitly rejected.
+                was_rejected = True
                 last_error = "Transfer rejected by peer"
                 LOG.warning(f"Attempt {attempt}: rejected by peer, not retrying")
                 break
@@ -510,12 +513,13 @@ class TransferService:
             if attempt < self.MAX_RETRIES:
                 time.sleep(2)
 
-        self.state.set_transfer_status(device.device_id, TransferStatus.ERROR)
+        final_status = TransferStatus.REJECTED if was_rejected else TransferStatus.ERROR
+        self.state.set_transfer_status(device.device_id, final_status)
         self._record(
             start_time, "sent", device.name, device.host,
             len(valid_files), total_size,
             time.time() - start_time,
-            TransferStatus.ERROR, last_error,
+            final_status, last_error,
         )
         threading.Timer(
             2.0, self.state.clear_progress, args=(device.device_id,)
