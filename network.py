@@ -10,28 +10,13 @@ import time
 from typing import List
 
 from history import TransferRecord
-from protocols import ProtocolSelector
+from protocols import ProtocolCapabilities, ProtocolSelector
 from security import Identity
 from state import AppStatus, Device, TransferStatus
 
 LOG = logging.getLogger(__name__)
 
 MCAST_GRP = "239.255.42.99"
-
-# Singleton Identity instance
-_identity_instance = None
-_identity_lock = threading.Lock()
-
-
-def get_identity() -> Identity:
-    """Get or create singleton Identity instance."""
-    global _identity_instance
-    if _identity_instance is None:
-        with _identity_lock:
-            if _identity_instance is None:
-                _identity_instance = Identity()
-                _identity_instance.load_or_create()
-    return _identity_instance
 
 
 # ── Helpers ─────────────────────────────────────────────
@@ -174,7 +159,6 @@ class Scanner:
                 )
                 
                 # Phase 2: Parse protocol capabilities
-                from protocols import ProtocolCapabilities
                 protocol_data = payload.get("protocols", [])
                 protocols = []
                 for p in protocol_data:
@@ -209,12 +193,14 @@ class TransferRequestEvent(QEvent):
 
     _TYPE = QEvent.Type(QEvent.registerEventType())
 
-    def __init__(self, peer_name: str, num_files: int, total_size: int, result: dict):
+    def __init__(self, peer_name: str, num_files: int, total_size: int,
+                 result: dict, ready: threading.Event):
         super().__init__(self._TYPE)
         self.peer_name = peer_name
         self.num_files = num_files
         self.total_size = total_size
         self.result = result
+        self.ready = ready
 
 
 # ── Transfer service (Phase 1 & 2 integrated) ──────────
@@ -222,16 +208,10 @@ class TransferRequestEvent(QEvent):
 
 class TransferService:
     """Protocol-agnostic file transfer service.
-    
-    Phase 1: Uses optimized TCP by default
-    Phase 2: Automatically selects QUIC when available
-    Phase 3: Ready for C++ crypto replacement
-    
-    Features:
-    - Automatic protocol selection (QUIC → TCP fallback)
-    - Multi-protocol server (TCP + QUIC simultaneously)
-    - Progress tracking
-    - Transfer history
+
+    Starts TCP (and QUIC when available) servers on construction.
+    Advertises only protocols whose servers successfully bound.
+    Selects the best common protocol for each outgoing transfer.
     """
 
     MAX_RETRIES = 3
@@ -245,10 +225,11 @@ class TransferService:
         self.state = state
         self.ui_root = ui_root
         self.history = history
-        
-        # Use singleton identity
-        self.identity = get_identity()
-        
+
+        identity = Identity()
+        identity.load_or_create()
+        self.identity = identity
+
         self.protocol_selector = ProtocolSelector(self.identity, state.cfg)
         
         # Start all available protocol servers
@@ -302,33 +283,29 @@ class TransferService:
     # ── Accept / reject prompt ──────────────────────────
 
     def _ask_user_accept(self, peer_name: str, num_files: int, total_size: int) -> bool:
-        """Ask user to accept incoming transfer (thread-safe via Qt event).
-        
-        Uses event posting to avoid blocking workers with modal dialogs.
-        Returns False on timeout or if user is busy.
+        """Ask user to accept an incoming transfer (thread-safe via Qt event).
+
+        Blocks until the user responds or ACCEPT_TIMEOUT seconds elapse.
+        Uses threading.Event so the worker thread sleeps with no polling.
         """
         if self.state.status == AppStatus.BUSY:
             return False
         if not self.ui_root:
-            return True
+            return True  # headless / test mode
 
         result: dict = {}
-        event = TransferRequestEvent(peer_name, num_files, total_size, result)
+        ready = threading.Event()
+        event = TransferRequestEvent(peer_name, num_files, total_size, result, ready)
 
         from PyQt6.QtWidgets import QApplication
         app = QApplication.instance()
         if not app:
-            LOG.warning("No QApplication instance, auto-accepting transfer")
-            return True
-        
+            return True  # no Qt event loop running
+
         app.postEvent(self.ui_root, event)
 
-        # Wait with shorter intervals for faster response
-        deadline = time.time() + self.ACCEPT_TIMEOUT
-        while time.time() < deadline:
-            if "decided" in result:
-                return result.get("accepted", False)
-            time.sleep(0.05)  # 50ms instead of 100ms
+        if ready.wait(timeout=self.ACCEPT_TIMEOUT):
+            return result.get("accepted", False)
 
         LOG.warning(f"Transfer acceptance timeout for {peer_name}")
         return False

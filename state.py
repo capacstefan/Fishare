@@ -28,7 +28,21 @@ class Device:
     port: int
     status: AppStatus
     last_seen: float = field(default_factory=time.time)
-    protocols: list = field(default_factory=list)  # Phase 2: supported protocols
+    protocols: list = field(default_factory=list)
+
+
+@dataclass
+class _TransferInfo:
+    """All transfer tracking state for one active or recently-finished transfer.
+
+    A single instance replaces the previous five parallel dicts plus the
+    _active_transfers set.  Presence in AppState._transfers means active.
+    """
+    ratio: float = 0.0
+    speed_mbps: float = 0.0
+    start_time: float = field(default_factory=time.time)
+    bytes_transferred: int = 0
+    status: TransferStatus = TransferStatus.COMPLETED
 
 
 class AppState:
@@ -43,13 +57,9 @@ class AppState:
         self.devices: Dict[str, Device] = {}
         self.selected_device_ids: List[str] = []
         self.selected_files: List[str] = []
-        self.progress: Dict[str, float] = {}
-        self.transfer_speeds: Dict[str, float] = {}
-        self.transfer_start_times: Dict[str, float] = {}
-        self.transfer_bytes: Dict[str, int] = {}
-        self.transfer_status: Dict[str, TransferStatus] = {}
-        # Set of device_ids currently in active transfer (won't be pruned)
-        self._active_transfers: set = set()
+        # One _TransferInfo per active/recent transfer.
+        # Presence in this dict == transfer is active (replaces _active_transfers set).
+        self._transfers: Dict[str, _TransferInfo] = {}
 
     # ── Status ──────────────────────────────────────────
 
@@ -65,111 +75,88 @@ class AppState:
             self.devices[dev.device_id] = dev
 
     def prune_devices(self, ttl_seconds: float = 6.0):
-        """Remove stale devices but never prune devices with active transfers."""
+        """Remove stale devices; never prune a device with an active transfer."""
         with self._lock:
             now = time.time()
             self.devices = {
-                k: v
-                for k, v in self.devices.items()
-                if now - v.last_seen < ttl_seconds or k in self._active_transfers
+                k: v for k, v in self.devices.items()
+                if now - v.last_seen < ttl_seconds or k in self._transfers
             }
-            # Clean up progress entries whose devices disappeared
-            self.progress = {k: v for k, v in self.progress.items() if k in self.devices}
             self.selected_device_ids = [
                 d for d in self.selected_device_ids if d in self.devices
             ]
-    
+
     def cleanup_stale_transfers(self, timeout_seconds: float = 300.0):
-        """Clean up transfers that have been stale for too long.
-        
-        This is a safety mechanism for transfers that failed to call clear_progress().
-        """
+        """Safety net: clear transfers that have been silent for 5 minutes."""
         with self._lock:
             now = time.time()
-            stale = []
-            for dev_id in self._active_transfers:
-                start_time = self.transfer_start_times.get(dev_id)
-                if start_time and (now - start_time) > timeout_seconds:
-                    progress = self.progress.get(dev_id, 0.0)
-                    # Only clean if not at 100% (completed transfers cleanup themselves)
-                    if progress < 0.99:
-                        stale.append(dev_id)
-            
+            stale = [
+                dev_id for dev_id, info in self._transfers.items()
+                if now - info.start_time > timeout_seconds and info.ratio < 0.99
+            ]
             for dev_id in stale:
-                self.clear_progress(dev_id)
+                del self._transfers[dev_id]
 
     # ── Transfer progress ───────────────────────────────
 
     def start_transfer(self, device_id: str):
-        """Mark the beginning of a transfer."""
         with self._lock:
-            self._active_transfers.add(device_id)
-            self.transfer_start_times[device_id] = time.time()
-            self.transfer_bytes[device_id] = 0
-            self.transfer_speeds[device_id] = 0.0
-            self.transfer_status[device_id] = TransferStatus.COMPLETED
+            self._transfers[device_id] = _TransferInfo()
 
     def reset_transfer_start(self, device_id: str):
-        """Reset the transfer start time to now.
-
-        Called by the sender on first byte sent, so the displayed speed
-        excludes connection setup and user think-time (Accept dialog).
-        """
+        """Reset speed timer to now (called on first byte sent, after Accept)."""
         with self._lock:
-            self.transfer_start_times[device_id] = time.time()
-            self.transfer_bytes[device_id] = 0
+            info = self._transfers.get(device_id)
+            if info:
+                info.start_time = time.time()
+                info.bytes_transferred = 0
 
     def is_transfer_active(self, device_id: str) -> bool:
-        """Return True if there is already an ongoing transfer for this device."""
         with self._lock:
-            return device_id in self._active_transfers
+            return device_id in self._transfers
 
     def update_progress(self, device_id: str, ratio: float, bytes_transferred: int = 0):
         with self._lock:
-            self.progress[device_id] = max(0.0, min(1.0, float(ratio)))
+            info = self._transfers.get(device_id)
+            if not info:
+                return
+            info.ratio = max(0.0, min(1.0, float(ratio)))
             if bytes_transferred > 0:
-                self.transfer_bytes[device_id] = bytes_transferred
-                start = self.transfer_start_times.get(device_id)
-                if start:
-                    elapsed = time.time() - start
-                    if elapsed > 0.01:  # avoid division by near-zero
-                        self.transfer_speeds[device_id] = (
-                            bytes_transferred / (1024 * 1024)
-                        ) / elapsed
+                info.bytes_transferred = bytes_transferred
+                elapsed = time.time() - info.start_time
+                if elapsed > 0.01:
+                    info.speed_mbps = (bytes_transferred / (1024 * 1024)) / elapsed
 
     def get_progress(self, device_id: str) -> float:
         with self._lock:
-            return float(self.progress.get(device_id, 0.0))
+            info = self._transfers.get(device_id)
+            return info.ratio if info else 0.0
 
     def get_speed(self, device_id: str) -> float:
-        """Get transfer speed in MB/s."""
         with self._lock:
-            return self.transfer_speeds.get(device_id, 0.0)
+            info = self._transfers.get(device_id)
+            return info.speed_mbps if info else 0.0
 
     def set_transfer_status(self, device_id: str, status: TransferStatus):
         with self._lock:
-            self.transfer_status[device_id] = status
+            info = self._transfers.get(device_id)
+            if info:
+                info.status = status
 
     def get_transfer_status(self, device_id: str) -> TransferStatus:
         with self._lock:
-            return self.transfer_status.get(device_id, TransferStatus.COMPLETED)
+            info = self._transfers.get(device_id)
+            return info.status if info else TransferStatus.COMPLETED
 
     def clear_progress(self, device_id: str):
-        """Clean up all transfer-related state for a device."""
         with self._lock:
-            self._active_transfers.discard(device_id)
-            self.progress.pop(device_id, None)
-            self.transfer_speeds.pop(device_id, None)
-            self.transfer_start_times.pop(device_id, None)
-            self.transfer_bytes.pop(device_id, None)
-            self.transfer_status.pop(device_id, None)
+            self._transfers.pop(device_id, None)
 
     def snapshot_progress(self) -> Dict[str, float]:
-        """Return a snapshot of progress dict (safe for UI iteration)."""
         with self._lock:
-            return dict(self.progress)
+            return {k: v.ratio for k, v in self._transfers.items()}
 
     def snapshot_devices(self) -> Dict[str, Device]:
-        """Return a snapshot of devices dict (safe for UI iteration)."""
         with self._lock:
             return dict(self.devices)
+

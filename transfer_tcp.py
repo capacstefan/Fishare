@@ -1,10 +1,9 @@
-"""Optimized TCP transfer protocol implementation.
+"""TCP file transfer protocol for FIshare.
 
-Phase 1 optimizations:
-- 1MB chunk size (was 64KB)
-- 4MB socket buffers (SO_SNDBUF, SO_RCVBUF)
-- TCP_NODELAY enabled (disable Nagle's algorithm)
-- Ready for Phase 3 C++ crypto replacement
+Transport: TCP with 8 MB socket buffers and TCP_NODELAY.
+Framing:    [4-byte big-endian length][ChaCha20-Poly1305 ciphertext]
+Control:    JSON frames (handshake, file headers)
+Data:       raw binary frames (no JSON serialisation overhead)
 """
 
 import json
@@ -26,37 +25,27 @@ LOG = logging.getLogger(__name__)
 
 
 class TCPProtocol(TransferProtocol):
-    """High-performance TCP file transfer with optimizations.
-    
-    Phase 1 Optimizations Applied:
-    ✓ 1MB chunks (16x larger than before → fewer syscalls)
-    ✓ 4MB socket buffers (eliminates RTT stalls)
-    ✓ TCP_NODELAY (no 40ms Nagle delays)
-    ✓ Proper connection timeouts
-    
-    Phase 3 Ready:
-    - Crypto abstraction allows C++ replacement
-    - Clean separation crypto/transport
+    """High-performance TCP file transfer.
 
-    Phase 2 optimizations (current):
-    - 4MB chunks (4x larger -> fewer frames, less GIL thrash)
-    - 8MB socket buffers
-    - recv_into + memoryview (zero-copy receive, 6.5x faster)
-    - Raw binary frames (no JSON encoding of file data)
-    - 4MB disk write buffer (reduces AV scanner interrupts)
+    - 1 MB chunks: best balance of syscall overhead vs pipelining
+    - 8 MB socket buffers: prevents RTT stalls on LAN
+    - TCP_NODELAY: no 40 ms Nagle delays
+    - recv_into + memoryview: zero-copy receive path
+    - Read-ahead queue for files > READ_AHEAD_MIN_SIZE: overlaps disk I/O
+      with encrypt+send so neither waits on the other
     """
 
     # Protocol wire version -- bump whenever the framing changes.
     # Both ends must agree or the connection is rejected cleanly.
     PROTO_VERSION = 2  # v2: raw binary frames for file data
 
-    # Tuned constants (benchmarked on this machine)
-    CHUNK_SIZE         = 1 * 1024 * 1024   # 1MB: best balance of overhead vs pipelining
-    SOCKET_BUFFER_SIZE = 8 * 1024 * 1024   # 8MB kernel socket buffers
-    MAX_FRAME_SIZE     = 100 * 1024 * 1024 # 100MB safety cap (well above 1MB chunks)
-    CONNECT_TIMEOUT    = 10.0
-    TRANSFER_TIMEOUT   = 120.0
-    MAX_CONCURRENT_TRANSFERS = 8           # Prevent DOS
+    CHUNK_SIZE             = 1 * 1024 * 1024   # 1 MB per send
+    SOCKET_BUFFER_SIZE     = 8 * 1024 * 1024   # 8 MB kernel socket buffers
+    MAX_FRAME_SIZE         = 100 * 1024 * 1024 # sanity cap (well above chunk size)
+    READ_AHEAD_MIN_SIZE    = 2 * 1024 * 1024   # skip thread overhead for tiny files
+    CONNECT_TIMEOUT        = 10.0
+    TRANSFER_TIMEOUT       = 120.0
+    MAX_CONCURRENT_TRANSFERS = 8               # prevent resource exhaustion
     
     def __init__(self, identity, cfg):
         super().__init__(identity, cfg)
@@ -83,7 +72,6 @@ class TCPProtocol(TransferProtocol):
             self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             
-            # Phase 1: Set server socket buffer (for accept queue)
             self._server_sock.setsockopt(
                 socket.SOL_SOCKET, socket.SO_RCVBUF, self.SOCKET_BUFFER_SIZE
             )
@@ -128,7 +116,6 @@ class TCPProtocol(TransferProtocol):
                     break
                 continue
             
-            # Phase 1: Optimize accepted connection
             self._optimize_socket(conn)
             
             # Handle in separate thread with concurrency limit
@@ -356,8 +343,7 @@ class TCPProtocol(TransferProtocol):
                 (host, port),
                 timeout=self.CONNECT_TIMEOUT
             )
-            
-            # Phase 1: Optimize socket
+
             self._optimize_socket(sock)
             
             # Key agreement
@@ -393,43 +379,52 @@ class TCPProtocol(TransferProtocol):
                 }, aead)
 
                 if fsize == 0:
-                    continue  # nothing to send for empty files
+                    continue  # empty file — header already sent, nothing to stream
 
-                # Read-ahead queue: a reader thread pre-fetches the next chunk
-                # from disk while the main thread is encrypting + sending the
-                # current one.  This fully overlaps disk I/O with network I/O,
-                # giving ~24% improvement on warm cache and more on cold reads.
-                # maxsize=2 caps extra RAM at 2 * CHUNK_SIZE (2MB).
-                read_q: queue.Queue = queue.Queue(maxsize=2)
+                # For large files, a reader thread pre-fetches the next chunk from
+                # disk while the main thread encrypts and sends the current one,
+                # fully overlapping disk I/O with network I/O.
+                # For small files the thread overhead outweighs the benefit.
+                if fsize >= self.READ_AHEAD_MIN_SIZE:
+                    read_q: queue.Queue = queue.Queue(maxsize=2)
 
-                def _reader(path=file_path, q=read_q):
-                    try:
-                        with open(path, "rb") as rf:
-                            while True:
-                                chunk = rf.read(self.CHUNK_SIZE)
-                                if not chunk:
-                                    break
-                                q.put(chunk)  # blocks if queue is full (backpressure)
-                    except Exception as exc:
-                        q.put(exc)  # propagate read errors to sender thread
-                    finally:
-                        q.put(None)  # sentinel: always sent last
+                    def _reader(path=file_path, q=read_q):
+                        try:
+                            with open(path, "rb") as rf:
+                                while True:
+                                    chunk = rf.read(self.CHUNK_SIZE)
+                                    if not chunk:
+                                        break
+                                    q.put(chunk)
+                        except Exception as exc:
+                            q.put(exc)
+                        finally:
+                            q.put(None)
 
-                threading.Thread(target=_reader, daemon=True,
-                                 name=f"reader-{fname}").start()
+                    threading.Thread(target=_reader, daemon=True,
+                                     name=f"reader-{fname}").start()
 
-                while True:
-                    item = read_q.get()
-                    if item is None:
-                        break  # file fully sent
-                    if isinstance(item, Exception):
-                        raise item  # re-raise disk read error on sender thread
-
-                    self._send_raw(sock, item, aead)
-                    sent_total += len(item)
-
-                    if progress_callback:
-                        progress_callback(sent_total, total_size)
+                    while True:
+                        item = read_q.get()
+                        if item is None:
+                            break
+                        if isinstance(item, Exception):
+                            raise item
+                        self._send_raw(sock, item, aead)
+                        sent_total += len(item)
+                        if progress_callback:
+                            progress_callback(sent_total, total_size)
+                else:
+                    # Small file: read and send directly, no thread overhead.
+                    with open(file_path, "rb") as f:
+                        while True:
+                            chunk = f.read(self.CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            self._send_raw(sock, chunk, aead)
+                            sent_total += len(chunk)
+                            if progress_callback:
+                                progress_callback(sent_total, total_size)
             
             LOG.info(f"TCP transfer complete: {len(valid_files)} files, {total_size} bytes")
             return True
@@ -445,11 +440,9 @@ class TCPProtocol(TransferProtocol):
                 except Exception:
                     pass
     
-    # Note: receive_files is handled inline in _handle_connection
-    # This method is kept for API compatibility but not used
-    def receive_files(self, conn_info, download_dir: str, progress_callback=None) -> bool:
-        """Not used - receiving is handled in _handle_connection."""
-        return True
+    # Note: receive_files() is intentionally not overridden here.
+    # Incoming transfers are handled inline in _handle_connection, which gives
+    # direct access to the socket, AEAD stream, and connection metadata.
 
     @staticmethod
     def _unique_path(path: str) -> str:
@@ -470,27 +463,12 @@ class TCPProtocol(TransferProtocol):
     # ── Phase 1: Socket optimization ───────────────────
     
     def _optimize_socket(self, sock: socket.socket):
-        """Apply Phase 1 TCP optimizations to a socket.
-        
-        1. Set 4MB buffers (eliminate RTT stalls)
-        2. Enable TCP_NODELAY (disable Nagle's algorithm)
-        3. Set transfer timeout
-        """
+        """Apply TCP performance settings to a connected socket."""
         try:
-            # 1. Socket buffers (4MB)
-            sock.setsockopt(
-                socket.SOL_SOCKET, socket.SO_SNDBUF, self.SOCKET_BUFFER_SIZE
-            )
-            sock.setsockopt(
-                socket.SOL_SOCKET, socket.SO_RCVBUF, self.SOCKET_BUFFER_SIZE
-            )
-            
-            # 2. TCP_NODELAY (disable Nagle - critical for small writes)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, self.SOCKET_BUFFER_SIZE)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.SOCKET_BUFFER_SIZE)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            
-            # 3. Generous timeout (prevent infinite hangs)
             sock.settimeout(self.TRANSFER_TIMEOUT)
-            
         except Exception as e:
             LOG.warning(f"Failed to optimize socket: {e}")
     

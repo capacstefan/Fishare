@@ -16,27 +16,24 @@ KEY_FILE = os.path.join(DATA_DIR, "id_ed25519.pem")
 HISTORY_FILE = os.path.join(DATA_DIR, "transfer_history.json")
 
 
-class Storage:
-    """Simple JSON file-backed storage."""
+def _load_config(defaults: dict) -> dict:
+    """Load persisted config from disk, returning *defaults* on any failure."""
+    if not os.path.exists(CONFIG_FILE):
+        return defaults
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return {**defaults, **json.load(f)}
+    except Exception:
+        return defaults
 
-    @staticmethod
-    def load(defaults: dict) -> dict:
-        if not os.path.exists(CONFIG_FILE):
-            return defaults
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)  # FIX: was json.loads(f) — file object, not string
-                return {**defaults, **data}
-        except Exception:
-            return defaults
 
-    @staticmethod
-    def save(obj) -> None:
-        try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(asdict(obj), f, indent=2)
-        except Exception as e:
-            logging.getLogger(__name__).warning(f"Failed to save config: {e}")
+def _save_config(obj) -> None:
+    """Persist a dataclass instance to disk as JSON."""
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(asdict(obj), f, indent=2)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Failed to save config: {e}")
 
 
 @dataclass
@@ -51,7 +48,7 @@ class Config:
 
     @staticmethod
     def load() -> "Config":
-        cfg = Config(**Storage.load(Config().__dict__))
+        cfg = Config(**_load_config(Config().__dict__))
         try:
             os.makedirs(cfg.download_dir, exist_ok=True)
         except Exception:
@@ -59,7 +56,7 @@ class Config:
         return cfg
 
     def save(self):
-        Storage.save(self)
+        _save_config(self)
 
 
 def setup_logging():

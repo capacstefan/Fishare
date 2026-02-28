@@ -714,7 +714,7 @@ class FIshareQtApp(QMainWindow):
         timer.stop()  # Cancel timer if user responded
         
         ev.result["accepted"] = reply == QMessageBox.StandardButton.Yes
-        ev.result["decided"] = True
+        ev.ready.set()  # unblock the waiting worker thread
 
 
 # ── Invoke event (run a callback on the GUI thread) ────

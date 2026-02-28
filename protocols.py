@@ -21,55 +21,27 @@ class ProtocolType(str, Enum):
 
 @dataclass
 class ProtocolCapabilities:
-    """Describes what a protocol implementation supports."""
-    
+    """Describes a protocol for advertisement and selection."""
+
     name: ProtocolType
     version: str
-    supports_multiplexing: bool  # Can send multiple files in parallel
-    supports_0rtt: bool          # Can establish connection with 0-RTT
-    requires_tls: bool           # Built-in encryption
-    port_offset: int             # Port offset from base listen_port
-    
+    port_offset: int  # added to base listen_port
+
     def to_dict(self) -> dict:
-        """Serialize for network advertisement."""
-        return {
-            "name": self.name.value,
-            "version": self.version,
-            "multiplexing": self.supports_multiplexing,
-            "0rtt": self.supports_0rtt,
-        }
-    
+        return {"name": self.name.value, "version": self.version}
+
     @staticmethod
     def from_dict(data: dict) -> Optional["ProtocolCapabilities"]:
-        """Deserialize from network advertisement."""
-        try:
-            name = data.get("name", "tcp")
-            if name == "tcp":
-                return TCP_CAPABILITIES
-            elif name == "quic":
-                return QUIC_CAPABILITIES
-        except Exception:
-            return None
+        name = data.get("name", "tcp")
+        if name == "tcp":
+            return TCP_CAPABILITIES
+        if name == "quic":
+            return QUIC_CAPABILITIES
+        return None
 
 
-# Protocol capability constants
-TCP_CAPABILITIES = ProtocolCapabilities(
-    name=ProtocolType.TCP,
-    version="1.0",
-    supports_multiplexing=False,
-    supports_0rtt=False,
-    requires_tls=False,
-    port_offset=0,
-)
-
-QUIC_CAPABILITIES = ProtocolCapabilities(
-    name=ProtocolType.QUIC,
-    version="1.0",
-    supports_multiplexing=True,
-    supports_0rtt=True,
-    requires_tls=True,
-    port_offset=1,  # QUIC uses listen_port + 1
-)
+TCP_CAPABILITIES  = ProtocolCapabilities(name=ProtocolType.TCP,  version="1.0", port_offset=0)
+QUIC_CAPABILITIES = ProtocolCapabilities(name=ProtocolType.QUIC, version="1.0", port_offset=1)
 
 
 class TransferProtocol(ABC):
@@ -133,24 +105,13 @@ class TransferProtocol(ABC):
         """
         pass
     
-    @abstractmethod
-    def receive_files(
-        self,
-        conn_info,
-        download_dir: str,
-        progress_callback=None
-    ) -> bool:
+    def receive_files(self, conn_info, download_dir: str, progress_callback=None) -> bool:
         """Receive files from an incoming connection.
-        
-        Args:
-            conn_info: Connection info from server callback
-            download_dir: Where to save received files
-            progress_callback: Called with (bytes_received, total_bytes)
-        
-        Returns:
-            True if all files received successfully
+
+        Default no-op: implementations that handle receiving inline
+        (e.g. TCPProtocol._handle_connection) do not need to override this.
         """
-        pass
+        return True
 
 
 class ProtocolSelector:
@@ -194,50 +155,29 @@ class ProtocolSelector:
         return [p.capabilities for p in self._protocols]
     
     def select_for_peer(
-        self, 
-        peer_capabilities: List[ProtocolCapabilities]
+        self,
+        peer_capabilities: List[ProtocolCapabilities],
     ) -> Optional[TransferProtocol]:
-        """Select best protocol that both peers support.
-        
-        Priority:
-        1. QUIC (if both support)
-        2. TCP (fallback, always available)
+        """Select the best protocol supported by both peers.
+
+        Iterates local protocols in preference order (QUIC first, then TCP)
+        and returns the first one the peer also supports.  Falls back to TCP
+        when there is no name match.
         """
         if not self._protocols:
-            LOG.error("No protocols available!")
             return None
-        
+
         if not peer_capabilities:
-            # Peer didn't advertise capabilities, assume TCP only
-            tcp = self.get_protocol(ProtocolType.TCP)
-            if tcp:
-                return tcp
-            # Fallback to first available protocol
-            LOG.warning("TCP not available, using first protocol")
-            return self._protocols[0] if self._protocols else None
-        
-        # Try to find best match
-        for our_proto in self._protocols:
-            for peer_cap in peer_capabilities:
-                if our_proto.capabilities.name == peer_cap.name:
-                    LOG.info(
-                        f"Selected {our_proto.capabilities.name.value} for transfer"
-                    )
-                    return our_proto
-        
-        # No match - use TCP fallback if available
-        tcp = self.get_protocol(ProtocolType.TCP)
-        if tcp:
-            LOG.warning("No protocol match, falling back to TCP")
-            return tcp
-        
-        # Last resort: use any available protocol
-        if self._protocols:
-            LOG.warning(f"Using fallback: {self._protocols[0].capabilities.name.value}")
-            return self._protocols[0]
-        
-        LOG.error("No compatible protocol found!")
-        return None
+            # Peer sent no capabilities — assume TCP only.
+            return self.get_protocol(ProtocolType.TCP) or self._protocols[0]
+
+        peer_names = {c.name for c in peer_capabilities}
+        for proto in self._protocols:
+            if proto.capabilities.name in peer_names:
+                return proto
+
+        # No name match — TCP is always the interoperable fallback.
+        return self.get_protocol(ProtocolType.TCP) or self._protocols[0]
     
     def get_protocol(self, proto_type: ProtocolType) -> Optional[TransferProtocol]:
         """Get specific protocol implementation."""
