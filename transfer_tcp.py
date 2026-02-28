@@ -232,8 +232,7 @@ class TCPProtocol(TransferProtocol):
                 with open(dest_path, "wb") as f:
                     remaining = fsize
                     while remaining > 0:
-                        msg = self._recv_json(conn, aead)
-                        data = msg.get("data", "").encode("latin1")
+                        data = self._recv_raw(conn, aead)
                         if not data:
                             raise ConnectionError("Received empty data chunk")
                         f.write(data)
@@ -368,20 +367,18 @@ class TCPProtocol(TransferProtocol):
                     "size": fsize,
                 }, aead)
                 
-                # Send file data in optimized chunks
+                # Send file data in optimised chunks — raw binary frames
+                # (no JSON wrapping: eliminates latin1 encode + json.dumps overhead)
                 with open(file_path, "rb") as f:
                     while True:
-                        # Phase 1: 1MB chunks (was 64KB)
                         chunk = f.read(self.CHUNK_SIZE)
                         if not chunk:
                             break
-                        
-                        self._send_json(sock, {
-                            "data": chunk.decode("latin1")
-                        }, aead)
-                        
+
+                        self._send_raw(sock, chunk, aead)
+
                         sent_total += len(chunk)
-                        
+
                         if progress_callback:
                             progress_callback(sent_total, total_size)
             
@@ -448,7 +445,31 @@ class TCPProtocol(TransferProtocol):
         except Exception as e:
             LOG.warning(f"Failed to optimize socket: {e}")
     
-    # ── Framed JSON protocol ───────────────────────────
+    # ── Raw binary frame helpers (used for file data) ──
+    #
+    # Frame format:  [4-byte big-endian length][encrypted payload]
+    # Identical wire structure to _send_json/_recv_json but skips
+    # JSON serialisation — critical for large binary payloads.
+
+    def _send_raw(self, sock: socket.socket, data: bytes, aead: AEADStream):
+        """Send a raw binary frame (no JSON encoding)."""
+        payload = aead.encrypt(data) if aead else data
+        sock.sendall(struct.pack(">I", len(payload)) + payload)
+
+    def _recv_raw(self, sock: socket.socket, aead: AEADStream) -> bytes:
+        """Receive a raw binary frame (no JSON decoding)."""
+        header = self._recvall(sock, 4)
+        if not header:
+            raise ConnectionError("Peer closed connection")
+        length = struct.unpack(">I", header)[0]
+        if length > self.MAX_FRAME_SIZE:
+            raise ValueError(f"Frame too large: {length} bytes")
+        payload = self._recvall(sock, length)
+        if not payload:
+            raise ConnectionError("Peer closed mid-frame")
+        return aead.decrypt(payload) if aead else payload
+
+    # ── Framed JSON protocol (control messages only) ───
     
     def _send_json(self, sock: socket.socket, obj: dict, aead: AEADStream):
         """Send length-prefixed JSON message."""
