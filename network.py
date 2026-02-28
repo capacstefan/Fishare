@@ -222,6 +222,10 @@ class TransferService:
     # Only socket.timeout / TimeoutError are worth retrying.
     _NON_RETRIABLE = (ConnectionResetError, ConnectionRefusedError, PermissionError)
 
+    # Minimum time between progress_cb calls. Throttles state updates and
+    # RLock acquisitions to at most 10 per second regardless of chunk rate.
+    _PROGRESS_MIN_INTERVAL = 0.1  # seconds
+
     def __init__(self, state, ui_root=None, history=None):
         self.state = state
         self.ui_root = ui_root
@@ -448,12 +452,15 @@ class TransferService:
         self.state.start_transfer(device.device_id)
 
         _speed_timer_reset = [False]
+        _last_cb_time = [0.0]
 
-        def progress_cb(bytes_sent, total):
+        def progress_cb(bytes_sent: int, total: int) -> None:
             if not _speed_timer_reset[0]:
                 _speed_timer_reset[0] = True
                 self.state.reset_transfer_start(device.device_id)
-            if total > 0:
+            now = time.time()
+            if total > 0 and (now - _last_cb_time[0]) >= self._PROGRESS_MIN_INTERVAL:
+                _last_cb_time[0] = now
                 self.state.update_progress(
                     device.device_id, bytes_sent / total, bytes_sent
                 )
@@ -468,6 +475,7 @@ class TransferService:
                     target_port,
                     valid_files,
                     progress_cb,
+                    total_size,
                 )
 
                 if success:

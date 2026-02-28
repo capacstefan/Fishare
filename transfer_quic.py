@@ -204,7 +204,8 @@ class QUICProtocol(TransferProtocol):
         host: str,
         port: int,
         files: List[str],
-        progress_callback=None
+        progress_callback=None,
+        total_size: int = 0,
     ) -> bool:
         """Send files via QUIC with parallel streams."""
         if not QUIC_AVAILABLE:

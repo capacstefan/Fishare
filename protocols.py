@@ -86,24 +86,26 @@ class TransferProtocol(ABC):
     
     @abstractmethod
     def send_files(
-        self, 
-        host: str, 
-        port: int, 
+        self,
+        host: str,
+        port: int,
         files: List[str],
-        progress_callback=None
+        progress_callback=None,
+        total_size: int = 0,
     ) -> bool:
         """Send files to a remote peer.
-        
+
         Args:
             host: Target host address
             port: Target port
             files: List of file paths to send
             progress_callback: Called with (bytes_sent, total_bytes)
-        
+            total_size: Pre-computed sum of file sizes in bytes.
+                        If 0, the implementation computes it internally.
+
         Returns:
             True if all files sent successfully
         """
-        pass
     
     def receive_files(self, conn_info, download_dir: str, progress_callback=None) -> bool:
         """Receive files from an incoming connection.

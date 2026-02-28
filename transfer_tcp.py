@@ -39,13 +39,12 @@ class TCPProtocol(TransferProtocol):
     # Both ends must agree or the connection is rejected cleanly.
     PROTO_VERSION = 2  # v2: raw binary frames for file data
 
-    CHUNK_SIZE             = 1 * 1024 * 1024   # 1 MB per send
-    SOCKET_BUFFER_SIZE     = 8 * 1024 * 1024   # 8 MB kernel socket buffers
-    MAX_FRAME_SIZE         = 100 * 1024 * 1024 # sanity cap (well above chunk size)
-    READ_AHEAD_MIN_SIZE    = 2 * 1024 * 1024   # skip thread overhead for tiny files
-    CONNECT_TIMEOUT        = 10.0
-    TRANSFER_TIMEOUT       = 120.0
-    MAX_CONCURRENT_TRANSFERS = 8               # prevent resource exhaustion
+    SOCKET_BUFFER_SIZE       = 8 * 1024 * 1024   # 8 MB kernel socket buffers
+    MAX_FRAME_SIZE           = 100 * 1024 * 1024 # sanity cap
+    READ_AHEAD_MIN_SIZE      = 8 * 1024 * 1024   # < 8 MB: direct path is faster than thread overhead
+    CONNECT_TIMEOUT          = 10.0
+    TRANSFER_TIMEOUT         = 60.0               # per-operation inactivity timeout
+    MAX_CONCURRENT_TRANSFERS = 8                  # prevent resource exhaustion
     
     def __init__(self, identity, cfg):
         super().__init__(identity, cfg)
@@ -322,34 +321,25 @@ class TCPProtocol(TransferProtocol):
         host: str,
         port: int,
         files: List[str],
-        progress_callback=None
+        progress_callback=None,
+        total_size: int = 0,
     ) -> bool:
-        """Send files via optimized TCP.
-        
-        Phase 1 optimizations applied to sender socket.
-        """
-        # Validate files
+        """Send files via optimized TCP."""
         valid_files = [f for f in files if os.path.isfile(f)]
         if not valid_files:
             LOG.warning("No valid files to send")
             return False
-        
-        total_size = sum(os.path.getsize(f) for f in valid_files)
-        
+
+        if total_size == 0:
+            total_size = sum(os.path.getsize(f) for f in valid_files)
+
         sock = None
         try:
-            # Connect with timeout
-            sock = socket.create_connection(
-                (host, port),
-                timeout=self.CONNECT_TIMEOUT
-            )
-
+            sock = socket.create_connection((host, port), timeout=self.CONNECT_TIMEOUT)
             self._optimize_socket(sock)
-            
-            # Key agreement
+
             aead = key_agree(sock, self.identity.sign)
-            
-            # Send transfer request
+
             files_rel = [os.path.basename(f) for f in valid_files]
             self._send_json(sock, {
                 "type": "send_request",
@@ -359,40 +349,33 @@ class TCPProtocol(TransferProtocol):
                 "peer_name": self.cfg.device_name,
             }, aead)
 
-            # Wait for acceptance
             resp = self._recv_json(sock, aead)
             if not resp.get("accept"):
                 reason = resp.get("error", "rejected")
                 LOG.info(f"Transfer rejected by peer: {reason}")
                 return False
-            
-            # Send each file
+
             sent_total = 0
             for file_path in valid_files:
                 fname = os.path.basename(file_path)
                 fsize = os.path.getsize(file_path)
+                chunk_size = self._adaptive_chunk_size(fsize)
 
-                # Send file header
-                self._send_json(sock, {
-                    "file": fname,
-                    "size": fsize,
-                }, aead)
+                self._send_json(sock, {"file": fname, "size": fsize}, aead)
 
                 if fsize == 0:
-                    continue  # empty file — header already sent, nothing to stream
+                    continue
 
-                # For large files, a reader thread pre-fetches the next chunk from
-                # disk while the main thread encrypts and sends the current one,
-                # fully overlapping disk I/O with network I/O.
-                # For small files the thread overhead outweighs the benefit.
                 if fsize >= self.READ_AHEAD_MIN_SIZE:
-                    read_q: queue.Queue = queue.Queue(maxsize=2)
+                    # Reader thread overlaps disk I/O with encrypt+send.
+                    # maxsize=4: up to 4 chunks buffered (max 16 MB for 4 MB chunks).
+                    read_q: queue.Queue = queue.Queue(maxsize=4)
 
-                    def _reader(path=file_path, q=read_q):
+                    def _reader(path=file_path, q=read_q, cs=chunk_size):
                         try:
                             with open(path, "rb") as rf:
                                 while True:
-                                    chunk = rf.read(self.CHUNK_SIZE)
+                                    chunk = rf.read(cs)
                                     if not chunk:
                                         break
                                     q.put(chunk)
@@ -415,31 +398,47 @@ class TCPProtocol(TransferProtocol):
                         if progress_callback:
                             progress_callback(sent_total, total_size)
                 else:
-                    # Small file: read and send directly, no thread overhead.
                     with open(file_path, "rb") as f:
                         while True:
-                            chunk = f.read(self.CHUNK_SIZE)
+                            chunk = f.read(chunk_size)
                             if not chunk:
                                 break
                             self._send_raw(sock, chunk, aead)
                             sent_total += len(chunk)
                             if progress_callback:
                                 progress_callback(sent_total, total_size)
-            
+
             LOG.info(f"TCP transfer complete: {len(valid_files)} files, {total_size} bytes")
             return True
-            
+
         except Exception as e:
             LOG.error(f"TCP send failed: {e}", exc_info=True)
             return False
         finally:
-            # Always close socket
             if sock:
                 try:
                     sock.close()
                 except Exception:
                     pass
     
+    @staticmethod
+    def _adaptive_chunk_size(fsize: int) -> int:
+        """Return the best chunk size for a file of *fsize* bytes.
+
+        Tiers:
+          < 512 KB  → one single read (fsize bytes)  — avoid extra syscall
+          < 10 MB   → 512 KB  — low memory pressure, good for many small files
+          < 100 MB  → 1 MB    — standard LAN sweet-spot
+          ≥ 100 MB  → 4 MB    — large file: amortise syscall overhead
+        """
+        if fsize < 512 * 1024:
+            return max(fsize, 1)           # one-shot; guard against fsize==0 caller
+        if fsize < 10 * 1024 * 1024:
+            return 512 * 1024
+        if fsize < 100 * 1024 * 1024:
+            return 1 * 1024 * 1024
+        return 4 * 1024 * 1024
+
     # Note: receive_files() is intentionally not overridden here.
     # Incoming transfers are handled inline in _handle_connection, which gives
     # direct access to the socket, AEAD stream, and connection metadata.
@@ -468,6 +467,9 @@ class TCPProtocol(TransferProtocol):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, self.SOCKET_BUFFER_SIZE)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.SOCKET_BUFFER_SIZE)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            # SO_KEEPALIVE lets the OS detect dead connections without application data,
+            # complementing the per-operation timeout set below.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             sock.settimeout(self.TRANSFER_TIMEOUT)
         except Exception as e:
             LOG.warning(f"Failed to optimize socket: {e}")
