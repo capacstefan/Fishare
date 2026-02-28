@@ -1,5 +1,126 @@
 [
   {
+    "timestamp": 1772283501.8214262,
+    "direction": "received",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 7,
+    "total_size": 13996807,
+    "duration": 0.3436737060546875,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1772283489.0816498,
+    "direction": "received",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 9,
+    "total_size": 17311329,
+    "duration": 0.3083360195159912,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1772283479.3112383,
+    "direction": "received",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 9,
+    "total_size": 17311329,
+    "duration": 0.379652738571167,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1772283465.6108677,
+    "direction": "received",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 9,
+    "total_size": 17311329,
+    "duration": 1.0501091480255127,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1772283267.2631953,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 4,
+    "total_size": 4036523,
+    "duration": 8.706544160842896,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1772283240.931169,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 11,
+    "total_size": 9519176,
+    "duration": 2.8722317218780518,
+    "status": "error",
+    "error_msg": "Transfer rejected by peer"
+  },
+  {
+    "timestamp": 1772283228.673781,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 11,
+    "total_size": 9519176,
+    "duration": 3.4277663230895996,
+    "status": "error",
+    "error_msg": "Transfer rejected by peer"
+  },
+  {
+    "timestamp": 1772283165.4428911,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 13,
+    "total_size": 74488229,
+    "duration": 2.6705098152160645,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1772283159.4304438,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 13,
+    "total_size": 74488229,
+    "duration": 3.184732675552368,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1772283149.3310235,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 13,
+    "total_size": 74488229,
+    "duration": 3.6587231159210205,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1772283126.0963767,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 13,
+    "total_size": 74488229,
+    "duration": 6.239800214767456,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
     "timestamp": 1772281181.898888,
     "direction": "sent",
     "peer_name": "DESKTOP-CU2U3RT",

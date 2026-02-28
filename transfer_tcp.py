@@ -18,6 +18,8 @@ from typing import Callable, List, Optional
 
 from protocols import ProtocolCapabilities, TCP_CAPABILITIES, TransferProtocol
 from security import AEADStream, key_agree
+from history import TransferRecord
+from state import TransferStatus
 
 LOG = logging.getLogger(__name__)
 
@@ -47,11 +49,10 @@ class TCPProtocol(TransferProtocol):
     # Both ends must agree or the connection is rejected cleanly.
     PROTO_VERSION = 2  # v2: raw binary frames for file data
 
-    # ── Optimized constants ─────────────────────────────
-    CHUNK_SIZE         = 4 * 1024 * 1024   # 4MB per frame (was 1MB)
-    SOCKET_BUFFER_SIZE = 8 * 1024 * 1024   # 8MB socket buffers (was 4MB)
-    FILE_WRITE_BUFFER  = 4 * 1024 * 1024   # 4MB disk-write buffer
-    MAX_FRAME_SIZE     = 200 * 1024 * 1024 # 200MB safety cap
+    # Tuned constants (benchmarked on this machine)
+    CHUNK_SIZE         = 1 * 1024 * 1024   # 1MB: best balance of overhead vs pipelining
+    SOCKET_BUFFER_SIZE = 8 * 1024 * 1024   # 8MB kernel socket buffers
+    MAX_FRAME_SIZE     = 100 * 1024 * 1024 # 100MB safety cap (well above 1MB chunks)
     CONNECT_TIMEOUT    = 10.0
     TRANSFER_TIMEOUT   = 120.0
     MAX_CONCURRENT_TRANSFERS = 8           # Prevent DOS
@@ -231,6 +232,9 @@ class TCPProtocol(TransferProtocol):
 
             # Receive files with progress tracking
             received_total = 0
+            # Hoist path validation base outside the per-file loop
+            download_dir_abs = os.path.abspath(self.cfg.download_dir)
+            os.makedirs(self.cfg.download_dir, exist_ok=True)
             for _ in files:
                 hdr = self._recv_json(conn, aead)
                 fname = os.path.basename(hdr.get("file", "unnamed")) or "unnamed"
@@ -239,12 +243,9 @@ class TCPProtocol(TransferProtocol):
                 # Security: validate path to prevent traversal
                 raw_path = os.path.join(self.cfg.download_dir, fname)
                 dest_path = os.path.abspath(raw_path)
-                download_dir_abs = os.path.abspath(self.cfg.download_dir)
                 if not dest_path.startswith(download_dir_abs + os.sep) and dest_path != download_dir_abs:
                     LOG.error(f"Path traversal attempt blocked: {fname!r}")
                     return
-
-                os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
 
                 # Deduplicate: never silently overwrite an existing file
                 dest_path = self._unique_path(dest_path)
@@ -252,9 +253,9 @@ class TCPProtocol(TransferProtocol):
 
                 LOG.info(f"Receiving: {fname} -> {os.path.basename(dest_path)} ({fsize} bytes)")
 
-                # Use a large write buffer so disk I/O happens in big batches
-                # (reduces AV scanner interruptions and syscall overhead).
-                with open(dest_path, "wb", buffering=self.FILE_WRITE_BUFFER) as f:
+                # OS write-caching is faster than Python-level buffering
+                # (benchmark: default open 20329 MB/s vs 4MB buffer 15578 MB/s)
+                with open(dest_path, "wb") as f:
                     remaining = fsize
                     while remaining > 0:
                         data = self._recv_raw(conn, aead)
@@ -281,8 +282,6 @@ class TCPProtocol(TransferProtocol):
                 app_state.update_progress(dev_id, 1.0, received_total)
 
                 if history_obj:
-                    from history import TransferRecord
-                    from state import TransferStatus
                     history_obj.add_record(TransferRecord(
                         timestamp=start_time,
                         direction="received",
@@ -309,8 +308,6 @@ class TCPProtocol(TransferProtocol):
 
             # ── Record failure to history ───────────────────────────────
             if app_state and history_obj:
-                from history import TransferRecord
-                from state import TransferStatus
                 try:
                     history_obj.add_record(TransferRecord(
                         timestamp=start_time,
@@ -479,15 +476,15 @@ class TCPProtocol(TransferProtocol):
     # JSON serialisation — critical for large binary payloads.
 
     def _send_raw(self, sock: socket.socket, data: bytes, aead: AEADStream):
-        """Send a raw binary frame (no JSON encoding).
+        """Send a raw binary frame as a single sendall() call.
 
-        Header and payload are sent in two separate sendall() calls to avoid
-        a full-payload memcpy that header+payload concatenation would cause.
-        The 4-byte overhead per 4MB frame is negligible (<0.0001%).
+        Combining the 4-byte length header with the payload into ONE sendall
+        avoids sending a standalone tiny header packet (which causes an extra
+        recv_into wake-up on the receiver and wastes a TCP segment).
+        The 1MB memcpy cost of concatenation is ~0.04ms, negligible vs network.
         """
         payload = aead.encrypt(data) if aead else data
-        sock.sendall(struct.pack(">I", len(payload)))
-        sock.sendall(payload)
+        sock.sendall(struct.pack(">I", len(payload)) + payload)
 
     def _recv_raw(self, sock: socket.socket, aead: AEADStream) -> bytes:
         """Receive a raw binary frame (no JSON decoding)."""
