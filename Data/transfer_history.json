@@ -1,5 +1,93 @@
 [
   {
+    "timestamp": 1772313570.8323286,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 1,
+    "total_size": 1481887744,
+    "duration": 27.498453617095947,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1772312505.9941351,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 1,
+    "total_size": 13166,
+    "duration": 0.1172184944152832,
+    "status": "error",
+    "error_msg": "Transfer rejected by peer"
+  },
+  {
+    "timestamp": 1772312500.519403,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 1,
+    "total_size": 13166,
+    "duration": 0.05964970588684082,
+    "status": "error",
+    "error_msg": "Transfer rejected by peer"
+  },
+  {
+    "timestamp": 1772312493.7323647,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 1,
+    "total_size": 13166,
+    "duration": 0.08887052536010742,
+    "status": "error",
+    "error_msg": "Transfer rejected by peer"
+  },
+  {
+    "timestamp": 1772312416.6419742,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 1,
+    "total_size": 13166,
+    "duration": 3.601311445236206,
+    "status": "error",
+    "error_msg": "Transfer rejected by peer"
+  },
+  {
+    "timestamp": 1772302449.1440082,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 3,
+    "total_size": 549194558,
+    "duration": 9.681135416030884,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1772302397.7712326,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 3,
+    "total_size": 549194558,
+    "duration": 11.129572629928589,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1772302377.1995583,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 3,
+    "total_size": 549194558,
+    "duration": 10.349320888519287,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
     "timestamp": 1772285690.1344109,
     "direction": "sent",
     "peer_name": "DESKTOP-CU2U3RT",

@@ -3,11 +3,12 @@
 import json
 import logging
 import os
+import queue
 import socket
 import struct
 import threading
 import time
-from typing import List
+from typing import Dict, List
 
 from history import TransferRecord
 from protocols import ProtocolCapabilities, ProtocolSelector
@@ -231,11 +232,19 @@ class TransferService:
         self.identity = identity
 
         self.protocol_selector = ProtocolSelector(self.identity, state.cfg)
-        
+
+        # Per-device outgoing queues and worker threads.
+        # Each device gets exactly one worker thread that drains its queue
+        # sequentially.  Devices are independent, so their workers run in
+        # parallel automatically.
+        self._queues: Dict[str, queue.Queue] = {}
+        self._workers: Dict[str, threading.Thread] = {}
+        self._worker_lock = threading.Lock()  # guards _queues and _workers
+
         # Start all available protocol servers
         self._servers = []
         self._start_all_servers()
-        
+
         # Validate at least one server started
         if not self._servers:
             raise RuntimeError(
@@ -336,46 +345,108 @@ class TransferService:
 
     # ── Outgoing transfer (sender) ──────────────────────
 
-    def send_to(self, device: Device, files: List[str]) -> bool:
-        """Send files using best available protocol.
-        
-        Phase 2: Tries QUIC first, fallbacks to TCP if needed.
+    def send_to(self, device: Device, files: List[str]) -> None:
+        """Enqueue a file batch for delivery to *device*. Non-blocking.
+
+        If *device* already has an active transfer, the batch is queued and
+        will be sent automatically when the current one finishes.  Multiple
+        calls for different devices launch independent worker threads so all
+        devices receive files in parallel.
         """
         valid_files = [p for p in files if os.path.isfile(p)]
         if not valid_files:
-            LOG.warning("No valid files to send")
+            LOG.warning("send_to: no valid files — skipping")
+            return
+
+        dev_id = device.device_id
+        with self._worker_lock:
+            if dev_id not in self._queues:
+                self._queues[dev_id] = queue.Queue()
+            self._queues[dev_id].put((device, valid_files))
+            self._ensure_worker_locked(dev_id)
+
+    def _ensure_worker_locked(self, device_id: str) -> None:
+        """Start a queue-draining worker for *device_id* if one isn't alive.
+
+        Must be called while holding *self._worker_lock*.
+        """
+        existing = self._workers.get(device_id)
+        if existing and existing.is_alive():
+            return
+        worker = threading.Thread(
+            target=self._run_queue_worker,
+            args=(device_id,),
+            daemon=True,
+            name=f"send-worker-{device_id}",
+        )
+        self._workers[device_id] = worker
+        worker.start()
+
+    def _run_queue_worker(self, device_id: str) -> None:
+        """Drain the send queue for one device, one transfer at a time.
+
+        Exits when the queue has been empty for 5 consecutive seconds.
+        The 5-second idle window is intentionally generous: it covers the
+        case where send_to() puts an item just after the worker drew Empty
+        but before acquiring _worker_lock to clean up — the worker will loop
+        back, get the item, and never create a broken state.
+        """
+        q = self._queues.get(device_id)
+        if q is None:
+            return
+
+        while True:
+            try:
+                device, files = q.get(timeout=5.0)
+            except queue.Empty:
+                # Queue appears empty — check under lock before exiting so we
+                # don't race with a concurrent send_to() that just enqueued.
+                with self._worker_lock:
+                    if q.empty():
+                        self._queues.pop(device_id, None)
+                        self._workers.pop(device_id, None)
+                        return
+                # Something was added between Empty and the lock — loop again.
+                continue
+
+            try:
+                self._execute_send(device, files)
+            except Exception as e:
+                LOG.error(
+                    f"Unhandled error in send worker for {device_id}: {e}",
+                    exc_info=True,
+                )
+
+    def _execute_send(self, device: Device, files: List[str]) -> bool:
+        """Execute one transfer to *device*. Blocking. Called only by the worker."""
+        # Re-validate files at execution time; they may have been deleted after
+        # the user pressed Send.
+        valid_files = [p for p in files if os.path.isfile(p)]
+        if not valid_files:
+            LOG.warning(f"execute_send to {device.name}: all files gone, skipping")
             return False
 
-        # Ensure device still exists (race condition guard)
-        if device.device_id not in self.state.devices:
-            LOG.warning(f"Device {device.name} no longer available")
+        # Re-resolve device from live state; the snapshot stored in the queue
+        # may be stale (IP could have changed after a reconnect).
+        live_device = self.state.devices.get(device.device_id)
+        if live_device is None:
+            LOG.warning(f"Device {device.name} ({device.device_id}) no longer in state, dropping transfer")
             return False
-
-        # Prevent state corruption from concurrent sends to the same device
-        if self.state.is_transfer_active(device.device_id):
-            LOG.warning(f"Transfer already in progress to {device.name}, ignoring duplicate")
-            return False
+        device = live_device
 
         total_size = sum(os.path.getsize(p) for p in valid_files)
         start_time = time.time()
 
-        # Select best protocol for this peer
-        peer_protocols = getattr(device, 'protocols', [])
+        peer_protocols = getattr(device, "protocols", [])
         protocol = self.protocol_selector.select_for_peer(peer_protocols)
-
         if not protocol:
-            LOG.error("No compatible protocol found!")
+            LOG.error(f"No compatible protocol for {device.name}")
             return False
 
         LOG.info(f"Using {protocol.capabilities.name.value} to send to {device.name}")
 
-        # Track progress
         self.state.start_transfer(device.device_id)
 
-        # first_byte flag: the start time recorded by start_transfer() includes
-        # connection setup and the user's Accept dialog think time.  We reset it
-        # on the first actual byte sent so the displayed speed reflects real
-        # network throughput, not "button-click-to-complete" elapsed time.
         _speed_timer_reset = [False]
 
         def progress_cb(bytes_sent, total):
@@ -387,13 +458,8 @@ class TransferService:
                     device.device_id, bytes_sent / total, bytes_sent
                 )
 
-        success = False
         last_error = ""
 
-        # Try to send with retries — but only for transient network errors.
-        # ConnectionResetError / ConnectionRefusedError are definitive: the
-        # receiver actively closed or is not listening.  Retrying those would
-        # just show the accept-dialog again on the remote machine.
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 target_port = device.port + protocol.capabilities.port_offset
@@ -418,29 +484,24 @@ class TransferService:
                     ).start()
                     return True
 
-                # send_files returned False — peer rejected or protocol error.
-                # Never retry a rejected transfer: the user already said no.
                 last_error = "Transfer rejected by peer"
-                LOG.warning(f"Attempt {attempt}: transfer rejected by peer, not retrying")
+                LOG.warning(f"Attempt {attempt}: rejected by peer, not retrying")
                 break
 
             except self._NON_RETRIABLE as e:
                 last_error = str(e)
                 LOG.warning(
-                    f"Attempt {attempt}: non-retriable error ({type(e).__name__}): {e} "
-                    f"— aborting retry loop"
+                    f"Attempt {attempt}: non-retriable ({type(e).__name__}): {e}"
                 )
-                break  # pointless and harmful to retry these
+                break
 
             except Exception as e:
                 last_error = str(e)
                 LOG.warning(f"Attempt {attempt} failed: {e}")
 
-            # Only reach here for genuinely transient errors
             if attempt < self.MAX_RETRIES:
                 time.sleep(2)
 
-        # All attempts exhausted — record the failure
         self.state.set_transfer_status(device.device_id, TransferStatus.ERROR)
         self._record(
             start_time, "sent", device.name, device.host,

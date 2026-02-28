@@ -614,16 +614,17 @@ class FIshareQtApp(QMainWindow):
         threading.Thread(target=self._do_send, daemon=True).start()
 
     def _do_send(self):
-        try:
-            for dev_id in list(self.state.selected_device_ids):
-                dev = self.state.devices.get(dev_id)
-                if dev:
-                    self.transfer.send_to(dev, list(self.state.selected_files))
-        finally:
-            # Re-enable button from the GUI thread
-            QApplication.instance().postEvent(
-                self, _InvokeEvent(self._after_send)
-            )
+        # send_to() is non-blocking (just enqueues). Iterating devices here is
+        # essentially instant, so the button re-enables immediately.
+        devices = [
+            self.state.devices[dev_id]
+            for dev_id in list(self.state.selected_device_ids)
+            if dev_id in self.state.devices
+        ]
+        files = list(self.state.selected_files)
+        for dev in devices:
+            self.transfer.send_to(dev, files)
+        QApplication.instance().postEvent(self, _InvokeEvent(self._after_send))
 
     def _after_send(self):
         self._refresh_lists()  # will re-evaluate send_btn enabled state

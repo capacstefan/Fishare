@@ -1,426 +1,309 @@
-# 🐟 FIshare
+﻿# ðŸŸ FIshare
 
 **Fast, secure, P2P file sharing over local networks**
 
-FIshare is a high-performance, encrypted file transfer application designed for local network use. Share files between computers on the same network with automatic peer discovery, end-to-end encryption, and intelligent protocol selection for optimal speed.
+FIshare is a high-performance, encrypted file transfer application for local network use. Share files between computers on the same LAN with automatic peer discovery, end-to-end encryption, and intelligent protocol selection.
 
 ---
 
-## ✨ Features
+## âœ¨ Features
 
-### 🚀 **Performance**
-- **High-speed transfers:** 90-110 MB/s on Gigabit LAN
-- **Multi-protocol support:** QUIC (with 0-RTT) and optimized TCP
-- **Automatic protocol selection:** Always uses the fastest available method
-- **Smart optimizations:** 1MB chunks, 4MB buffers, TCP_NODELAY
-- **Efficient crypto:** ChaCha20-Poly1305 AEAD encryption
+### ðŸš€ Performance
+- **High-speed transfers:** 50â€“110 MB/s on Gigabit LAN (CPU and disk dependent)
+- **Multi-protocol support:** TCP (always available) and QUIC (optional, requires cert files)
+- **Automatic protocol selection:** Best common protocol negotiated per peer
+- **Binary wire protocol:** Raw encrypted frames â€” no JSON serialisation overhead on data
+- **Read-ahead I/O:** Background reader thread overlaps disk reads with network sends for files â‰¥ 2 MB
+- **Zero-copy receive:** `recv_into` + `memoryview` â€” no internal buffer copies
+- **8 MB socket buffers + TCP_NODELAY:** Eliminates RTT stalls and Nagle delays
 
-### 🔒 **Security**
-- **End-to-end encryption:** All transfers encrypted with ChaCha20-Poly1305
-- **Authenticated key exchange:** Ed25519 signatures + X25519 ECDH
-- **Path traversal protection:** Files always saved to designated download folder
-- **Connection limiting:** DOS protection with concurrent transfer limits
-- **Secure defaults:** No configuration needed for secure operation
+### ðŸ”’ Security
+- **End-to-end encryption:** ChaCha20-Poly1305 AEAD with incremental nonces
+- **Authenticated key exchange:** X25519 ephemeral ECDH + Ed25519 signatures (bounded to exact key sizes)
+- **Forward secrecy:** New ephemeral keys per connection
+- **Path traversal protection:** Received files always land in the configured download folder
+- **Filename deduplication:** Incoming files never silently overwrite existing ones (`file.pdf` â†’ `file(1).pdf`)
+- **Partial file cleanup:** Incomplete files deleted automatically on transfer failure
+- **Connection limiting:** Semaphore-based DOS protection (max 8 concurrent incoming transfers)
+- **Protocol version check:** Mismatched clients receive a clean rejection, not a crash
 
-### 🎨 **User Experience**
-- **Zero configuration:** Automatic peer discovery via multicast
-- **Modern UI:** Clean, Apple-inspired dark theme with PyQt6
-- **Real-time progress:** Live transfer speeds and progress tracking
-- **Transfer history:** Complete record of all sent/received files
-- **Auto-timeout dialogs:** Never blocks indefinitely waiting for user input
-  - **Safe filename deduplication:** Incoming files never silently overwrite existing ones; duplicate names become `file(1).pdf`, `file(2).pdf`, etc.
-- **Modular design:** Protocol abstraction layer for easy extensibility
-- **Graceful fallbacks:** QUIC → TCP automatic fallback
-- **Thread-safe:** Proper state management with locks and synchronization
-- **Resource efficient:** Semaphore-based connection limiting
-- **Clean code:** Well-structured, maintainable, documented
+### ðŸŽ¨ User Experience
+- **Zero configuration:** Automatic peer discovery via UDP multicast
+- **Parallel transfers:** Each target device gets its own worker thread â€” sending to 3 devices transfers to all 3 simultaneously
+- **Per-device send queue:** Pressing Send while a transfer is active queues the new files; they are sent automatically when the current transfer finishes
+- **Non-blocking UI:** Send button re-activates immediately after queuing â€” the UI never freezes waiting for a transfer
+- **Modern UI:** Clean, Apple-inspired dark theme (PyQt6)
+- **Real-time progress:** Per-device progress bars with live MB/s speed display
+- **Accurate speed reporting:** Timer starts on first byte sent (after key agreement and Accept dialog), not at button click
+- **Transfer history:** Complete record of sent and received transfers
+- **Auto-timeout accept dialog:** 30-second timeout â€” never blocks indefinitely
+- **Available / Busy toggle:** Instantly stops accepting new incoming transfers
 
 ---
 
-## 📦 Installation
+## ðŸ“¦ Installation
 
 ### Requirements
-- **Python:** 3.8 or higher
+- **Python:** 3.9 or higher
 - **OS:** Windows, macOS, or Linux
-- **Network:** Local network (LAN/WiFi) with multicast support
+- **Network:** Local network with multicast support
 
-### Basic Installation (TCP only)
+### Basic Installation (TCP)
 ```bash
-# Clone or download the repository
 cd Fishare
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Run the application
 python app.py
 ```
 
-### With QUIC Support (Optional - Faster)
+### With QUIC Support (Optional)
 ```bash
-# Install aioquic for QUIC protocol support
 pip install aioquic
-
-# Run the application
+# Also required: generate TLS cert/key pair
+openssl req -x509 -newkey rsa:2048 -keyout Data/quic_key.pem -out Data/quic_cert.pem -days 365 -nodes -subj "/CN=fishare"
 python app.py
 ```
 
-**Note:** If `aioquic` installation fails (requires C compiler), the application works perfectly with TCP only. QUIC is optional and provides additional performance benefits.
+QUIC requires both `aioquic` installed **and** `Data/quic_cert.pem` + `Data/quic_key.pem` present. If either is missing, QUIC is silently skipped and TCP is used. The application works correctly with TCP alone.
 
 ---
 
-## 🎯 Quick Start
+## ðŸŽ¯ Quick Start
 
 1. **Launch the application:**
    ```bash
    python app.py
    ```
 
-2. **Set your status:**
-   - Click "Available" to accept incoming transfers
-   - Click "Busy" to reject incoming transfers
+2. **Set your status** to `Available` to accept incoming transfers.
 
 3. **Send files:**
-   - Select files using "Browse Files" or drag & drop
-   - Select a discovered peer from the device list
-   - Click "Send to Selected Device"
+   - Click `ï¼‹ Add Files` to select files (can be clicked multiple times â€” files accumulate)
+   - Double-click a file in the list to remove it; click `âœ• Clear All` to reset
+   - Double-click a discovered peer to add it to the Send To list
+   - Click `Send` â€” transfer starts immediately (or is queued if that device is busy)
 
 4. **Receive files:**
-   - Accept or reject the incoming transfer dialog
-   - Files are automatically saved to `~/Downloads/FIshare/`
+   - Accept or reject the incoming dialog (auto-rejects after 30 s)
+   - Files saved to the configured download folder (default: `~/Downloads/FIshare/`)
 
 5. **View history:**
-   - Click "History" to see all past transfers
-   - Double-click entries for details
+   - Click `ðŸ•˜ History` in the toolbar
 
 ---
 
-## 📊 Performance
+## ðŸ—ï¸ Architecture
 
-### Transfer Speeds
+### Component Map
 
-| Network Type | Speed | Notes |
-|-------------|-------|-------|
-| **Gigabit LAN** | 90-110 MB/s | QUIC with multi-stream |
-| **WiFi 5GHz** | 55-85 MB/s | Better with QUIC (packet loss recovery) |
-| **WiFi 2.4GHz** | 20-35 MB/s | QUIC 0-RTT reduces latency |
+```
+app.py              â€” Entry point: wires state, service, GUI, discovery
+main_window.py      â€” PyQt6 main window and all UI components
+config.py           â€” Config dataclass + JSON persistence
+state.py            â€” Thread-safe AppState (_TransferInfo per active transfer)
 
-### Optimizations Applied
+network.py          â€” Discovery and transfer orchestration
+  â”œâ”€ Advertiser     â€” Periodic multicast broadcast (1.5 s interval)
+  â”œâ”€ Scanner        â€” Peer discovery, stale device GC
+  â””â”€ TransferServiceâ€” Per-device queue workers, protocol selection, retry logic
 
-**TCP Optimizations:**
-- 1MB transfer chunks (16x larger than typical)
-- 4MB socket buffers (eliminates RTT stalls)
-- TCP_NODELAY enabled (no Nagle algorithm delays)
-- Proper connection timeouts and error handling
+protocols.py        â€” Protocol abstraction
+  â”œâ”€ ProtocolSelector â€” Negotiates best mutual protocol
+  â””â”€ TransferProtocol â€” Abstract base (is_available, start_server, send_files)
 
-**QUIC Protocol (Optional):**
-- 0-RTT connection establishment (50ms vs 150ms)
-- No head-of-line blocking (parallel streams)
-- Built-in TLS 1.3 encryption
-- Better loss recovery for WiFi/mobile networks
-- Connection migration support
+transfer_tcp.py     â€” TCPProtocol: server loop, _handle_connection, send_files
+transfer_quic.py    â€” QUICProtocol: optional, requires cert files + aioquic
 
-**Result:** 2-3x faster than typical implementations
+security.py         â€” AEADStream (ChaCha20-Poly1305), key_agree() (X25519+Ed25519), Identity (Ed25519)
+history.py          â€” TransferRecord dataclass + JSON-backed TransferHistory
+history_window.py   â€” History dialog (PyQt6)
+```
+
+### Send Flow (Outgoing)
+
+```
+User clicks Send
+  â””â”€ _do_send() iterates selected devices (instant â€” just enqueues)
+       â”œâ”€ Device A: queue empty  â†’ worker thread started â†’ transfer begins now
+       â”œâ”€ Device B: transfer active â†’ files appended to queue â†’ sent after current finishes
+       â””â”€ Device C: new device  â†’ worker thread started â†’ transfer begins now (parallel with A)
+
+Worker thread (_run_queue_worker):
+  while queue not empty:
+    pop (device, files)
+    _execute_send(device, files)
+      â”œâ”€ Re-validate files exist on disk
+      â”œâ”€ Re-resolve device from live state (IP may have changed)
+      â”œâ”€ Protocol negotiation â†’ select_for_peer()
+      â”œâ”€ TCP connect + key exchange (X25519 ECDH)
+      â”œâ”€ Send request JSON â†’ wait for Accept
+      â”œâ”€ For each file:
+      â”‚    send header JSON
+      â”‚    if file â‰¥ 2 MB: read-ahead thread + encrypt+send main thread
+      â”‚    else: direct read+encrypt+send
+      â””â”€ Record to history
+```
+
+### Receive Flow (Incoming)
+
+```
+TCPProtocol._server_loop() accepts connection
+  â””â”€ _handle_connection_wrapper() (semaphore: max 8 concurrent)
+       â””â”€ _handle_connection():
+            â”œâ”€ key_agree() â€” X25519 + Ed25519 handshake
+            â”œâ”€ _handler_callback() â†’ TransferRequestEvent posted to GUI thread
+            â”‚    User has 30 s to Accept / Reject (threading.Event.wait â€” no polling)
+            â”œâ”€ For each file:
+            â”‚    recv header â†’ validate path â†’ open(dest, "wb")
+            â”‚    _recv_raw loop â†’ f.write(data) â†’ update_progress()
+            â”‚    on error: delete partial file
+            â””â”€ Record to history
+```
+
+### Wire Protocol
+
+```
+Frame format (both control and data):
+  [4-byte big-endian payload length][ChaCha20-Poly1305 encrypted payload]
+
+Control messages: JSON-encoded plaintext inside the encrypted payload
+Data chunks:      raw bytes inside the encrypted payload (no JSON overhead)
+
+Handshake sequence:
+  1. Both sides: send X25519 pub key (32 B) + Ed25519 signature (64 B)
+  2. Sender: send_request JSON {type, proto_version, files, total, peer_name}
+  3. Receiver: {accept: true/false}
+  4. For each file â€” Sender: {file, size} JSON header â†’ raw binary chunks
+```
+
+### State Management
+
+`AppState` uses a single `RLock` and one `Dict[str, _TransferInfo]` for all transfer tracking. Presence in the dict means the transfer is active (replaces the previous five parallel dicts + a set). The UI polls a snapshot every 500 ms â€” no direct access to live state from the GUI thread.
 
 ---
 
-## 🔐 Security Architecture
+## ðŸ“Š Performance
 
-### Encryption
-- **Algorithm:** ChaCha20-Poly1305 AEAD
-- **Key Exchange:** X25519 ephemeral ECDH
-- **Signatures:** Ed25519 for key authentication
-- **Nonce:** Incremental (guaranteed unique)
+| Network | Typical Speed | Notes |
+|---------|--------------|-------|
+| Gigabit LAN (wired) | 70â€“110 MB/s | SSD-to-SSD |
+| WiFi 5 GHz | 40â€“80 MB/s | Distance and interference dependent |
+| WiFi 2.4 GHz | 15â€“35 MB/s | QUIC helps with packet loss |
 
-### Security Features
-- **End-to-end encryption:** All data encrypted before transmission
-- **Forward secrecy:** New ephemeral keys per session
-- **Authentication:** Signed public keys prevent MITM
-- **Path validation:** Prevents directory traversal attacks
-  - **Filename deduplication:** Incoming files never overwrite existing ones
-  - **Partial file cleanup:** Incomplete files are deleted automatically on transfer failure
-  - **Resource protection:** Connection limits + per-device concurrency guard prevent DOS and state corruption
-  - **Bounded key exchange:** Enforces exact X25519 (32 B) and Ed25519 (64 B) sizes; rejects malformed peers before any allocation
-
-### Threat Model
-✅ **Protects against:**
-- Eavesdropping on local network
-- Man-in-the-middle attacks (with key verification)
-- Path traversal / file write vulnerabilities
-- Silent file overwrites (filename deduplication)
-- Partial file corruption on network failure (auto-cleanup)
-- Malformed key exchange from malicious peers (bounded sizes)
-- Resource exhaustion / DOS attacks
-- Stale connection/memory leaks
-
-⚠️ **Does not protect against:**
-- Compromised endpoints (malware on sender/receiver)
-- Physical access to storage (files decrypted after receipt)
-- Network-layer attacks (router compromise)
+**Key optimisations:**
+- 1 MB chunks: fewer syscalls than 64 KB, no memory pressure vs 4 MB
+- 8 MB kernel socket buffers: fills Gigabit pipe without stalls
+- Single `sendall(header + payload)`: avoids extra TCP segment from two-call approach
+- `recv_into + memoryview`: zero-copy receive, no intermediate `bytearray` copies
+- Read-ahead thread (files â‰¥ 2 MB): disk I/O and network I/O run in parallel
+- Speed timer reset on first byte: displayed MB/s reflects actual network throughput
 
 ---
 
-## 🏗️ Technical Architecture
+## ðŸ” Security Architecture
 
-### Core Components
+| Layer | Algorithm | Purpose |
+|-------|-----------|---------|
+| Symmetric encryption | ChaCha20-Poly1305 | All data in transit |
+| Key exchange | X25519 ephemeral ECDH | Session key derivation |
+| Authentication | Ed25519 signatures | Peer public key verification |
+| KDF | HKDF-SHA256 | Session key from shared secret |
+| Nonce | 12-byte incremental counter | Guaranteed uniqueness |
 
-```
-app.py              - Application entry point, Qt initialization
-main_window.py      - PyQt6 GUI implementation
-config.py           - Configuration management
-state.py            - Thread-safe application state
+**Threat model:**
 
-network.py          - Discovery & transfer orchestration
-  ├─ Advertiser     - Multicast presence broadcasting
-  ├─ Scanner        - Peer discovery & lifecycle management
-  └─ TransferService- Protocol-agnostic file transfers
+âœ… Protects against: eavesdropping, MITM (with key pinning), path traversal, silent file overwrites, partial file corruption, malformed key exchange, resource exhaustion
 
-protocols.py        - Protocol abstraction layer
-  ├─ ProtocolSelector - Automatic protocol selection
-  └─ TransferProtocol - Abstract base class
-
-transfer_tcp.py     - Optimized TCP implementation
-transfer_quic.py    - QUIC implementation (optional)
-
-security.py         - Cryptographic operations
-  ├─ Identity       - Ed25519 signing identity
-  ├─ AEADStream     - ChaCha20-Poly1305 encryption
-  └─ key_agree()    - X25519 key exchange
-
-history.py          - Transfer history tracking
-history_window.py   - History UI dialog
-```
-
-### Protocol Flow
-
-**Discovery:**
-```
-[Advertiser] → Multicast (UDP 49221) → [Scanner]
-  - Sends: device name, host, port, status, protocols
-  - Frequency: Every 1.5 seconds
-  - TTL: 6 seconds
-```
-
-**File Transfer:**
-```
-1. Sender selects protocol (QUIC or TCP)
-2. Connection established (port 49222 for TCP, 49223 for QUIC)
-3. Key exchange (X25519 ECDH + Ed25519 signatures)
-4. Send transfer request (file list, total size)
-5. Receiver accepts/rejects
-6. Files sent in encrypted chunks
-7. Progress tracked, history recorded
-```
-
-### Data Persistence
-
-| File | Purpose | Location |
-|------|---------|----------|
-| `config.json` | User settings | `Data/config.json` |
-| `id_ed25519.pem` | Identity key | `Data/id_ed25519.pem` |
-| `transfer_history.json` | Transfer log | `Data/transfer_history.json` |
-| `fishare.log` | Application logs | `Data/fishare.log` |
+âš ï¸ Does not protect against: compromised endpoints, physical storage access, network-layer attacks (router compromise), adversarial peers on the same LAN who have your public key
 
 ---
 
-## ⚙️ Configuration
+## âš™ï¸ Configuration
 
-### Default Settings
+Default settings (stored in `Data/config.json`):
 
-```python
-device_name: str = "Your Computer Name"
-download_dir: str = "~/Downloads/FIshare"
-allow_incoming: bool = True
-listen_port: int = 49222        # TCP
-discovery_port: int = 49221     # Multicast UDP
-```
-
-### Modify Settings
-
-Edit `Data/config.json` or change in the GUI (Settings button):
 ```json
 {
-  "device_name": "My Laptop",
-  "download_dir": "/path/to/downloads",
+  "device_name": "YOUR-PC",
+  "download_dir": "C:/Users/you/Downloads/FIshare",
   "allow_incoming": true,
   "listen_port": 49222,
   "discovery_port": 49221
 }
 ```
 
-### Advanced Configuration
+Settings can be changed in the GUI (device name field + folder button). Config is saved automatically on change.
 
-**Protocol-specific:**
-- TCP chunk size: 1MB (hardcoded in `transfer_tcp.py`)
-- Socket buffers: 4MB (hardcoded)
-- Connection timeout: 10s
-- Transfer timeout: 120s
-- Max concurrent transfers: 8
+**Ports used:**
 
-**Security:**
-- Key file location: `Data/id_ed25519.pem`
-- Automatically generated on first run
-- Rotation/revocation: Delete file and restart app
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 49221 | UDP multicast | Peer discovery |
+| 49222 | TCP | File transfers |
+| 49223 | UDP (QUIC) | File transfers (optional) |
 
 ---
 
-## 🧪 Verification
+## ðŸ“ Data Files
 
-### Check Installation
-```bash
-# Verify all modules load
-python -c "from app import *; from network import *; print('✓ Installation OK')"
+| File | Purpose |
+|------|---------|
+| `Data/config.json` | User settings |
+| `Data/id_ed25519.pem` | Persistent Ed25519 identity key (auto-generated) |
+| `Data/transfer_history.json` | Transfer log (last 1000 records) |
+| `Data/fishare.log` | Rotating application log (5 MB Ã— 5 files) |
+| `Data/quic_cert.pem` | TLS certificate for QUIC (user-provided, optional) |
+| `Data/quic_key.pem` | TLS private key for QUIC (user-provided, optional) |
+
+---
+
+## ðŸ› Troubleshooting
+
+**No peers discovered**
+- Both devices must be on the same subnet
+- Allow UDP 49221 through the firewall
+- Corporate/guest WiFi often blocks multicast â€” use a personal router
+
+**Transfers fail immediately**
+- Allow TCP 49222 (and UDP 49223 for QUIC) through the firewall
+- Check `Data/fishare.log` for the specific error
+
+**Transfer rejected / accept dialog not appearing**
+- Receiving device may be set to `Busy`
+- Accept dialog times out after 30 s â€” check the receiver screen
+
+**Slower than expected**
+- Run `iperf3` between devices to verify raw network speed
+- Check disk write speed on receiver (`CrystalDiskMark` on Windows)
+- SSD â†’ HDD transfers are disk-limited, not network-limited
+
+**QUIC not available**
+- Install `aioquic`: `pip install aioquic`
+- Generate cert files (see Installation section above)
+- Both are required â€” missing either disables QUIC silently
+
+---
+
+## ðŸ“š Dependencies
+
+```
+PyQt6 >= 6.6.0          # GUI framework
+cryptography >= 43.0.0  # ChaCha20-Poly1305, Ed25519, X25519, HKDF
 ```
 
-### Check Available Protocols
-```bash
-python -c "
-from protocols import ProtocolSelector
-from security import Identity
-from config import Config
-
-cfg = Config.load()
-identity = Identity()
-identity.load_or_create()
-selector = ProtocolSelector(identity, cfg)
-
-print('Available protocols:')
-for proto in selector.get_protocols():
-    print(f'  - {proto.capabilities.name.value}')
-"
+Optional:
 ```
-
-**Expected output:**
-- With QUIC: `quic` and `tcp`
-- Without QUIC: `tcp` only
-
-### Performance Test
-```bash
-# Test with large file (1GB+) between two machines
-# Monitor transfer speed in the UI
-# Expected: 90+ MB/s on Gigabit LAN
+aioquic >= 0.9.20       # QUIC protocol (also requires TLS cert files)
 ```
 
 ---
 
-## 🐛 Troubleshooting
+## ðŸš€ Planned Enhancements
 
-### Application won't start
-- **Check Python version:** `python --version` (need 3.8+)
-- **Install dependencies:** `pip install -r requirements.txt`
-- **Check logs:** `Data/fishare.log`
-
-### No peers discovered
-- **Same network?** Both devices must be on same LAN/WiFi
-- **Firewall:** Allow UDP port 49221 (discovery)
-- **Multicast:** Some networks block multicast (corporate WiFi)
-- **Check status:** Ensure both devices are "Available"
-
-### Transfers fail
-- **Firewall:** Allow TCP port 49222 (and UDP 49223 for QUIC)
-- **Protocol mismatch:** Check logs for protocol selection
-- **Disk space:** Ensure receiver has sufficient space
-- **Permissions:** Check write permissions to download folder
-
-### Slower than expected
-- **Network test:** Run `iperf3` to verify network speed
-- **QUIC blocked:** If UDP blocked, falls back to TCP
-- **Disk I/O:** Check disk write speed (SSD vs HDD)
-- **CPU usage:** Monitor CPU during transfer
-
-### QUIC not available
-- **Normal behavior:** aioquic is optional
-- **To enable:** `pip install aioquic`
-- **Requirement:** C compiler needed for installation
-- **Impact:** App works fine without QUIC, uses TCP
+- **C++ native module (pybind11):** Zero-copy buffer ring, `sendfile(2)` on Linux, scatter-gather I/O â€” targeting 150+ MB/s
+- **Transfer resume:** Checkpoint files for interrupted large transfers
+- **Bandwidth throttling:** QoS per device or global cap
 
 ---
 
-## 📚 Dependencies
+**Happy sharing! ðŸŸ**
 
-### Core (Required)
-```
-PyQt6 >= 6.6.0          # Modern Qt GUI framework
-cryptography >= 43.0.0  # ChaCha20-Poly1305, Ed25519, X25519
-```
-
-### Optional (Performance)
-```
-aioquic >= 0.9.20       # QUIC protocol support (+30-100% speed)
-```
-
-### Python Standard Library
-- `socket`, `threading`, `asyncio`, `json`, `os`, `struct`
-- `dataclasses`, `enum`, `logging`, `time`, `typing`
-
----
-
-## 🛡️ Security Considerations
-
-### Safe Usage
-- ✅ Use on trusted local networks (home, office)
-- ✅ Verify recipient identity before sending sensitive files
-- ✅ Keep download folder permissions restricted
-- ✅ Update Python and dependencies regularly
-
-### Unsafe Usage
-- ❌ Do NOT use over untrusted networks (public WiFi)
-- ❌ Do NOT use across the internet (no NAT traversal)
-- ❌ Do NOT share illegal or confidential content
-- ❌ Do NOT run with elevated privileges
-
-### Privacy
-- **Local only:** No internet connection, no cloud, no telemetry
-- **No accounts:** No registration, no user tracking
-- **Ephemeral keys:** New session keys per transfer
-- **Minimal storage:** Only transfer history and identity key
-
----
-
-## 🚀 Future Enhancements
-
-### Planned (Phase 3)
-- **C++ Crypto Module:** Hardware-accelerated encryption (AES-NI)
-  - Expected: 200+ MB/s on Gigabit LAN
-  - Reduction: 40-60% CPU usage
-  - Timeline: 2-3 days implementation
-
-### Potential Future Features
-- Transfer resume capability
-- Bandwidth throttling / QoS
-- Rate limiting per IP
-- Peer identity verification UI
-- Mobile app support (iOS/Android)
-- Dark/light theme toggle
-- Multi-language support
-
----
-
-## 📝 License
-
-This application is provided as-is for local network file sharing.
-
-**Cryptography Notice:** Uses industry-standard algorithms (ChaCha20-Poly1305, Ed25519, X25519) via the `cryptography` library which relies on OpenSSL.
-
----
-
-## 🙏 Acknowledgments
-
-- **PyQt6:** Modern Python Qt bindings
-- **cryptography:** Python cryptographic library
-- **aioquic:** Python QUIC implementation
-- Built with attention to security, performance, and user experience
-
----
-
-## 📧 Support
-
-For issues, questions, or contributions:
-1. Check logs: `Data/fishare.log`
-2. Verify installation: Run verification commands above
-3. Test network: Use `iperf3` or `ping` between devices
-4. Check firewall: Ensure ports 49221-49223 are open
-
----
-
-**Happy sharing! 🐟**

@@ -12,6 +12,5 @@
 3. **No "Fix-on-Fix"**: If a bug is found, identify the root cause in the architecture and fix it there, not through a wrapper or a patch.
 4. **Simplification**: If a solution looks too complex, stop and find a more intuitive, "Pythonic" way.
 
-## Output Format
-- Provide the full file content if the file is under 100 lines.
-- For larger files, provide complete, self-contained methods/classes that can be swapped directly.
+## Operating System
+- The code you provide is meant for Windows OS but don't take this as a no.1 rule, its just for you to know
