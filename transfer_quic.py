@@ -54,6 +54,7 @@ class QUICProtocol(TransferProtocol):
     """
     
     CHUNK_SIZE = 1024 * 1024  # 1MB chunks
+    CONNECT_TIMEOUT = 8.0     # Max seconds to wait for QUIC connection
     
     def __init__(self, identity, cfg):
         super().__init__(identity, cfg)
@@ -64,63 +65,102 @@ class QUICProtocol(TransferProtocol):
         self._shutdown = False
     
     def is_available(self) -> bool:
-        """Check if QUIC is available (aioquic installed)."""
-        return QUIC_AVAILABLE
+        """QUIC is available only when aioquic is installed AND TLS certificates
+        have been provisioned at Data/quic_cert.pem / Data/quic_key.pem.
+
+        Note: The QUIC application-layer protocol (key exchange + framing)
+        is not yet fully implemented.  Until both certs and the full protocol
+        are in place this returns False so the app falls back to TCP.
+        """
+        if not QUIC_AVAILABLE:
+            return False
+        from pathlib import Path
+        return (
+            Path("Data/quic_cert.pem").exists()
+            and Path("Data/quic_key.pem").exists()
+        )
     
     # ── Server (receiver) ───────────────────────────────
     
     def start_server(self, handler_callback) -> bool:
-        """Start QUIC server for incoming transfers."""
+        """Start QUIC server for incoming transfers.
+        
+        Uses a threading.Event to synchronise the result from the background
+        thread, so we return True only when the server is *actually* bound.
+        Returns False immediately if TLS cert generation or bind fails.
+        """
         if not QUIC_AVAILABLE:
             LOG.warning("Cannot start QUIC server: aioquic not installed")
             return False
-        
+
         try:
             self._handler_callback = handler_callback
             self._shutdown = False
-            
-            # Start asyncio loop in background thread
+
+            _ready   = threading.Event()   # signalled once server bound or failed
+            _ok      = [False]             # mutated by background thread
+
             self._loop = asyncio.new_event_loop()
-            
+
             def run_server():
                 asyncio.set_event_loop(self._loop)
-                self._loop.run_until_complete(self._start_quic_server())
-            
+                self._loop.run_until_complete(
+                    self._start_quic_server(_ready, _ok)
+                )
+
             server_thread = threading.Thread(
                 target=run_server, daemon=True, name="quic-server"
             )
             server_thread.start()
-            
+
+            # Wait up to 3 s for the server to actually bind (or fail)
+            _ready.wait(timeout=3.0)
+
+            if not _ok[0]:
+                LOG.warning(
+                    "QUIC server failed to initialise "
+                    "(cert or bind error) — transfers will use TCP only"
+                )
+                return False
+
             port = self.cfg.listen_port + self._capabilities.port_offset
-            LOG.info(f"QUIC server starting on port {port}")
+            LOG.info(f"QUIC server started on UDP port {port}")
             return True
-            
+
         except Exception as e:
             LOG.error(f"Failed to start QUIC server: {e}")
             return False
-    
-    async def _start_quic_server(self):
+
+    # ── TLS certificate helpers ─────────────────────────
+
+    @staticmethod
+    def _load_tls_cert():
+        """Load existing TLS cert/key files.  Raises FileNotFoundError if missing."""
+        from pathlib import Path
+        certfile = Path("Data/quic_cert.pem")
+        keyfile  = Path("Data/quic_key.pem")
+        if not certfile.exists() or not keyfile.exists():
+            raise FileNotFoundError(
+                "QUIC TLS certificates not found at Data/quic_cert.pem / "
+                "Data/quic_key.pem.  Falling back to TCP."
+            )
+        return str(certfile), str(keyfile)
+
+    async def _start_quic_server(self, ready_event=None, ok_flag=None):
         """Async QUIC server loop."""
         try:
-            # Configure QUIC
+            certfile, keyfile = self._load_tls_cert()
+
             configuration = QuicConfiguration(
                 alpn_protocols=H3_ALPN,
                 is_client=False,
                 max_datagram_frame_size=65536,
             )
-            
-            # Generate or load TLS certificate
-            # Note: For production, use proper certificates
-            # For now, generate self-signed
-            configuration.load_cert_chain(
-                certfile=None,  # Will auto-generate
-                keyfile=None,
-            )
-            
+            configuration.load_cert_chain(certfile=certfile, keyfile=keyfile)
+
             port = self.cfg.listen_port + self._capabilities.port_offset
-            
-            # Start server
-            await serve(
+
+            server = await serve(
                 host="0.0.0.0",
                 port=port,
                 configuration=configuration,
@@ -128,15 +168,25 @@ class QUICProtocol(TransferProtocol):
                     *args, handler=self._handler_callback
                 ),
             )
-            
+
+            # Signal success — server is bound
+            if ok_flag is not None:
+                ok_flag[0] = True
+            if ready_event is not None:
+                ready_event.set()
+
             LOG.info(f"QUIC server listening on UDP port {port}")
-            
-            # Keep running until shutdown
+
             while not self._shutdown:
                 await asyncio.sleep(1)
-                
+
+            server.close()
+
         except Exception as e:
             LOG.error(f"QUIC server error: {e}", exc_info=True)
+            # Signal failure so start_server() returns False quickly
+            if ready_event is not None:
+                ready_event.set()  # ok_flag stays False
     
     def stop_server(self):
         """Stop QUIC server."""
@@ -171,7 +221,10 @@ class QUICProtocol(TransferProtocol):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             result = loop.run_until_complete(
-                self._async_send_files(host, port, valid_files, progress_callback)
+                asyncio.wait_for(
+                    self._async_send_files(host, port, valid_files, progress_callback),
+                    timeout=self.CONNECT_TIMEOUT,
+                )
             )
             loop.close()
             return result

@@ -259,21 +259,33 @@ class TransferService:
             )
 
     def _start_all_servers(self):
-        """Start servers for all available protocols."""
+        """Start servers for all available protocols.
+
+        Any protocol whose server fails to start is removed from the selector
+        so it will neither be used for outgoing transfers nor advertised to
+        remote peers.
+        """
+        failed = []
         for protocol in self.protocol_selector.get_protocols():
+            name = protocol.capabilities.name.value
             try:
                 if protocol.start_server(self._handle_incoming_transfer):
                     self._servers.append(protocol)
-                    LOG.info(f"Started {protocol.capabilities.name.value} server")
+                    LOG.info(f"Started {name} server")
                 else:
-                    LOG.warning(
-                        f"Failed to start {protocol.capabilities.name.value} server"
-                    )
+                    LOG.warning(f"Failed to start {name} server — removing from available protocols")
+                    failed.append(protocol)
             except Exception as e:
-                LOG.error(
-                    f"Exception starting {protocol.capabilities.name.value}: {e}",
-                    exc_info=True
-                )
+                LOG.error(f"Exception starting {name} server: {e}", exc_info=True)
+                failed.append(protocol)
+
+        # Remove protocols whose servers didn't start so they are never
+        # advertised or selected for outgoing transfers.
+        for proto in failed:
+            try:
+                self.protocol_selector._protocols.remove(proto)
+            except ValueError:
+                pass
 
     def stop(self):
         """Stop all protocol servers."""

@@ -232,13 +232,20 @@ def _section(title: str, widget: QWidget) -> QVBoxLayout:
 class FIshareQtApp(QMainWindow):
     """Main FIshare application window."""
 
-    def __init__(self, state, advertiser, scanner, history=None):
+    def __init__(self, state, advertiser, scanner, history=None, transfer=None):
         super().__init__()
         self.state = state
         self.advertiser = advertiser
         self.scanner = scanner
         self.history = history
-        self.transfer = TransferService(state, self, history)
+
+        if transfer is not None:
+            # TransferService was already created (and servers started) in app.py.
+            # Set ui_root now that the window exists so dialogs work correctly.
+            self.transfer = transfer
+            self.transfer.ui_root = self
+        else:
+            self.transfer = TransferService(state, self, history)
 
         self.setWindowTitle("FIshare")
         self.resize(1060, 740)
