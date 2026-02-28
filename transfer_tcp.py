@@ -35,7 +35,9 @@ class TCPProtocol(TransferProtocol):
     - Crypto abstraction allows C++ replacement
     - Clean separation crypto/transport
     """
-    
+        # Protocol wire version — bump whenever the framing changes.
+    # Both ends must agree or the connection is rejected cleanly.
+    PROTO_VERSION = 2  # v2: raw binary frames for file data
     # ── Phase 1: Optimized constants ────────────────────
     CHUNK_SIZE = 1024 * 1024           # 1MB (was 64KB)
     SOCKET_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB
@@ -168,6 +170,17 @@ class TCPProtocol(TransferProtocol):
 
             if req.get("type") != "send_request":
                 LOG.warning(f"Invalid request from {addr}")
+                return
+
+            # Reject if sender uses a different wire protocol version.
+            sender_version = req.get("proto_version", 1)  # default 1 for old clients
+            if sender_version != self.PROTO_VERSION:
+                LOG.error(
+                    f"Protocol version mismatch from {addr}: "
+                    f"sender={sender_version}, expected={self.PROTO_VERSION}. "
+                    f"Update FIshare on both machines."
+                )
+                self._send_json(conn, {"accept": False, "error": "proto_version_mismatch"}, aead)
                 return
 
             files = req.get("files", [])
@@ -344,15 +357,17 @@ class TCPProtocol(TransferProtocol):
             files_rel = [os.path.basename(f) for f in valid_files]
             self._send_json(sock, {
                 "type": "send_request",
+                "proto_version": self.PROTO_VERSION,
                 "files": files_rel,
                 "total": total_size,
                 "peer_name": self.cfg.device_name,
             }, aead)
-            
+
             # Wait for acceptance
             resp = self._recv_json(sock, aead)
             if not resp.get("accept"):
-                LOG.info("Transfer rejected by peer")
+                reason = resp.get("error", "rejected")
+                LOG.info(f"Transfer rejected by peer: {reason}")
                 return False
             
             # Send each file

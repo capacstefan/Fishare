@@ -237,6 +237,10 @@ class TransferService:
     MAX_RETRIES = 3
     ACCEPT_TIMEOUT = 30.0
 
+    # Errors where retrying is pointless (and would re-prompt the receiver).
+    # Only socket.timeout / TimeoutError are worth retrying.
+    _NON_RETRIABLE = (ConnectionResetError, ConnectionRefusedError, PermissionError)
+
     def __init__(self, state, ui_root=None, history=None):
         self.state = state
         self.ui_root = ui_root
@@ -400,7 +404,10 @@ class TransferService:
         success = False
         last_error = ""
 
-        # Try to send with retries
+        # Try to send with retries — but only for transient network errors.
+        # ConnectionResetError / ConnectionRefusedError are definitive: the
+        # receiver actively closed or is not listening.  Retrying those would
+        # just show the accept-dialog again on the remote machine.
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 target_port = device.port + protocol.capabilities.port_offset
@@ -425,15 +432,25 @@ class TransferService:
                     ).start()
                     return True
 
-                # send_files returned False (peer rejected / no exception)
-                last_error = "Transfer rejected or failed without exception"
-                LOG.warning(f"Attempt {attempt}: send returned False")
+                # send_files returned False — peer rejected or protocol error.
+                # Never retry a rejected transfer: the user already said no.
+                last_error = "Transfer rejected by peer"
+                LOG.warning(f"Attempt {attempt}: transfer rejected by peer, not retrying")
+                break
+
+            except self._NON_RETRIABLE as e:
+                last_error = str(e)
+                LOG.warning(
+                    f"Attempt {attempt}: non-retriable error ({type(e).__name__}): {e} "
+                    f"— aborting retry loop"
+                )
+                break  # pointless and harmful to retry these
 
             except Exception as e:
                 last_error = str(e)
                 LOG.warning(f"Attempt {attempt} failed: {e}")
 
-            # Wait between retries, but not after the last one
+            # Only reach here for genuinely transient errors
             if attempt < self.MAX_RETRIES:
                 time.sleep(2)
 
