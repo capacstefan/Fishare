@@ -15,12 +15,49 @@ from config import DATA_DIR, KEY_FILE
 
 
 class AEADStream:
-    """ChaCha20-Poly1305 AEAD stream with incremental nonce."""
+    """ChaCha20-Poly1305 AEAD stream with incremental nonce.
+
+    The raw key bytes and nonce counters are exposed as properties so that the
+    C++ engine (cpp_engine) can be initialised from the same session state after
+    the JSON handshake phase completes.  The C++ engine increments its own copy
+    of the nonce and returns the new value; callers must write it back here
+    (aead.send_nonce = new_val) to keep both sides in sync.
+    """
 
     def __init__(self, key: bytes):
+        self._key  = bytes(key)          # retained for C++ engine initialisation
         self._aead = ChaCha20Poly1305(key)
         self._send_nonce = 0
         self._recv_nonce = 0
+
+    # ── Properties for C++ engine integration ──────────
+
+    @property
+    def key(self) -> bytes:
+        """Raw 32-byte session key."""
+        return self._key
+
+    @property
+    def send_nonce(self) -> int:
+        """Current send-side nonce counter."""
+        return self._send_nonce
+
+    @send_nonce.setter
+    def send_nonce(self, value: int) -> None:
+        """Sync send-nonce after C++ engine finishes a batch of frames."""
+        self._send_nonce = int(value)
+
+    @property
+    def recv_nonce(self) -> int:
+        """Current receive-side nonce counter."""
+        return self._recv_nonce
+
+    @recv_nonce.setter
+    def recv_nonce(self, value: int) -> None:
+        """Sync recv-nonce after C++ engine finishes a batch of frames."""
+        self._recv_nonce = int(value)
+
+    # ── AEAD primitives ────────────────────────────────
 
     def _n2b(self, n: int) -> bytes:
         return n.to_bytes(12, "big")

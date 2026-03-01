@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
-from typing import Dict
+from typing import Dict, List
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QFont
@@ -28,21 +28,13 @@ from PyQt6.QtWidgets import (
 )
 
 from history_window import HistoryWindow
-from network import TransferRequestEvent, TransferService
+from network import TransferRequestEvent
+from transfer_service import TransferService
 from state import AppStatus, TransferStatus
+from utils import human_size
 
 MAX_NAME_LEN = 32
 
-
-# ── Helper: human-readable file size ───────────────────
-
-
-def _human_size(b: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if b < 1024:
-            return f"{b:.1f} {unit}" if unit != "B" else f"{b} {unit}"
-        b /= 1024
-    return f"{b:.2f} TB"
 
 
 # ════════════════════════════════════════════════════════
@@ -243,6 +235,10 @@ class FIshareQtApp(QMainWindow):
         self.advertiser = advertiser
         self.scanner = scanner
         self.history = history
+
+        # UI-local selection state (not shared with AppState)
+        self._selected_files: Dict[str, int] = {}   # path → cached file size
+        self._selected_device_ids: List[str] = []
 
         if transfer is not None:
             # TransferService was already created (and servers started) in app.py.
@@ -570,50 +566,40 @@ class FIshareQtApp(QMainWindow):
     def _pick_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Select files to send")
         if files:
-            # Append new files, deduplicated
-            existing = set(self.state.selected_files)
             for f in files:
-                if f not in existing:
-                    self.state.selected_files.append(f)
-                    existing.add(f)
+                if f not in self._selected_files:
+                    self._selected_files[f] = os.path.getsize(f)  # cached once
             self._refresh_lists()
 
     def _remove_file(self, item: QListWidgetItem):
         path = item.data(Qt.ItemDataRole.UserRole)
-        if path and path in self.state.selected_files:
-            self.state.selected_files.remove(path)
+        self._selected_files.pop(path, None)
         self._refresh_lists()
 
     def _clear_files(self):
-        self.state.selected_files.clear()
+        self._selected_files.clear()
         self._refresh_lists()
 
-    def _add_peer(self):
-        item = self.device_list.currentItem()
-        if not item:
-            return
+    def _add_peer(self, item: QListWidgetItem):
         dev_id = item.data(Qt.ItemDataRole.UserRole)
         if not dev_id:
             return
         dev = self.state.devices.get(dev_id)
-        if dev and dev.status == AppStatus.AVAILABLE and dev_id not in self.state.selected_device_ids:
-            self.state.selected_device_ids.append(dev_id)
+        if dev and dev.status == AppStatus.AVAILABLE and dev_id not in self._selected_device_ids:
+            self._selected_device_ids.append(dev_id)
         self._refresh_lists()
 
-    def _remove_peer(self):
-        item = self.target_list.currentItem()
-        if not item:
-            return
+    def _remove_peer(self, item: QListWidgetItem):
         dev_id = item.data(Qt.ItemDataRole.UserRole)
-        if dev_id and dev_id in self.state.selected_device_ids:
-            self.state.selected_device_ids.remove(dev_id)
+        if dev_id and dev_id in self._selected_device_ids:
+            self._selected_device_ids.remove(dev_id)
         self._refresh_lists()
 
     # ── Send ────────────────────────────────────────────
 
     @pyqtSlot()
     def _send(self):
-        if not self.state.selected_files or not self.state.selected_device_ids:
+        if not self._selected_files or not self._selected_device_ids:
             return
         self.send_btn.setEnabled(False)
         threading.Thread(target=self._do_send, daemon=True).start()
@@ -623,10 +609,10 @@ class FIshareQtApp(QMainWindow):
         # essentially instant, so the button re-enables immediately.
         devices = [
             self.state.devices[dev_id]
-            for dev_id in list(self.state.selected_device_ids)
+            for dev_id in list(self._selected_device_ids)
             if dev_id in self.state.devices
         ]
-        files = list(self.state.selected_files)
+        files = list(self._selected_files.keys())
         for dev in devices:
             self.transfer.send_to(dev, files)
         QApplication.instance().postEvent(self, _InvokeEvent(self._after_send))
@@ -655,7 +641,9 @@ class FIshareQtApp(QMainWindow):
 
         # Targets
         self.target_list.clear()
-        for dev_id in self.state.selected_device_ids:
+        # Prune any devices that went offline since last refresh.
+        self._selected_device_ids = [d for d in self._selected_device_ids if d in devices_snap]
+        for dev_id in self._selected_device_ids:
             dev = devices_snap.get(dev_id)
             if dev:
                 item = QListWidgetItem(f"➤  {dev.name}   ({dev.host})")
@@ -664,15 +652,15 @@ class FIshareQtApp(QMainWindow):
 
         # Files
         self.file_list.clear()
-        for path in self.state.selected_files:
+        for path, size in self._selected_files.items():
             name = os.path.basename(path)
-            size = _human_size(os.path.getsize(path)) if os.path.isfile(path) else "?"
-            item = QListWidgetItem(f"📄  {name}  ({size})")
+            size_str = human_size(size) if os.path.isfile(path) else "?"
+            item = QListWidgetItem(f"📄  {name}  ({size_str})")
             item.setData(Qt.ItemDataRole.UserRole, path)
             self.file_list.addItem(item)
 
         # Send button state
-        can_send = bool(self.state.selected_files) and bool(self.state.selected_device_ids)
+        can_send = bool(self._selected_files) and bool(self._selected_device_ids)
         self.send_btn.setEnabled(can_send)
 
     # ── History ─────────────────────────────────────────
@@ -694,7 +682,7 @@ class FIshareQtApp(QMainWindow):
 
     def _on_incoming(self, ev: TransferRequestEvent):
         """Handle incoming transfer with auto-timeout dialog."""
-        size_str = _human_size(ev.total_size)
+        size_str = human_size(ev.total_size)
         msg = (
             f"{ev.peer_name} wants to send {ev.num_files} file(s)\n"
             f"Total size: {size_str}\n\nAccept?"

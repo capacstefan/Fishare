@@ -127,9 +127,8 @@ class ProtocolSelector:
     
     def _discover_protocols(self):
         """Discover and initialize available protocols."""
-        # Import protocol implementations
-        from transfer_quic import QUICProtocol
-        from transfer_tcp import TCPProtocol
+        # Import protocol implementations from consolidated module
+        from transfer import QUICProtocol, TCPProtocol
         
         # Try QUIC first (faster), fallback to TCP
         protocols_to_try = [

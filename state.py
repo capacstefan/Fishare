@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from threading import RLock
-from typing import Dict, List
+from typing import Dict
 
 
 class AppStatus(str, Enum):
@@ -56,11 +56,11 @@ class AppState:
             AppStatus.AVAILABLE if cfg.allow_incoming else AppStatus.BUSY
         )
         self.devices: Dict[str, Device] = {}
-        self.selected_device_ids: List[str] = []
-        self.selected_files: List[str] = []
         # One _TransferInfo per active/recent transfer.
         # Presence in this dict == transfer is active (replaces _active_transfers set).
         self._transfers: Dict[str, _TransferInfo] = {}
+        # dev_id -> timestamp after which the transfer entry should be cleared.
+        self._pending_clears: Dict[str, float] = {}
 
     # ── Status ──────────────────────────────────────────
 
@@ -83,9 +83,6 @@ class AppState:
                 k: v for k, v in self.devices.items()
                 if now - v.last_seen < ttl_seconds or k in self._transfers
             }
-            self.selected_device_ids = [
-                d for d in self.selected_device_ids if d in self.devices
-            ]
 
     def cleanup_stale_transfers(self, timeout_seconds: float = 300.0):
         """Safety net: clear transfers that have been silent for 5 minutes."""
@@ -152,6 +149,26 @@ class AppState:
     def clear_progress(self, device_id: str):
         with self._lock:
             self._transfers.pop(device_id, None)
+
+    def schedule_clear_progress(self, device_id: str, delay: float = 2.0):
+        """Schedule transfer entry removal after *delay* seconds.
+
+        Processed by Scanner._gc() so no extra threads are created.
+        """
+        with self._lock:
+            self._pending_clears[device_id] = time.time() + delay
+
+    def process_pending_clears(self):
+        """Remove transfer entries whose scheduled delay has elapsed.
+
+        Called periodically by the Scanner GC thread.
+        """
+        with self._lock:
+            now = time.time()
+            ready = [k for k, t in self._pending_clears.items() if now >= t]
+            for k in ready:
+                self._pending_clears.pop(k, None)
+                self._transfers.pop(k, None)
 
     def snapshot_progress(self) -> Dict[str, float]:
         with self._lock:

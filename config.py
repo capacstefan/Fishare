@@ -1,5 +1,6 @@
 """Application configuration, storage, and logging setup."""
 
+import dataclasses
 import json
 import logging
 import os
@@ -48,7 +49,16 @@ class Config:
 
     @staticmethod
     def load() -> "Config":
-        cfg = Config(**_load_config(Config().__dict__))
+        # Build defaults from field definitions — avoids creating a throwaway instance.
+        defaults = {
+            f.name: (
+                f.default
+                if f.default is not dataclasses.MISSING
+                else f.default_factory()
+            )
+            for f in dataclasses.fields(Config)
+        }
+        cfg = Config(**_load_config(defaults))
         try:
             os.makedirs(cfg.download_dir, exist_ok=True)
         except Exception:
@@ -66,7 +76,7 @@ def setup_logging():
     root.setLevel(logging.INFO)
 
     # Avoid duplicate handlers on repeated calls
-    if any(isinstance(h, RotatingFileHandler) for h in root.handlers):
+    if root.handlers:
         return
 
     ch = logging.StreamHandler()

@@ -14,14 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from history import TransferHistory
-
-
-def _fmt_size(b: int) -> str:
-    for u in ("B", "KB", "MB", "GB"):
-        if b < 1024:
-            return f"{b:.1f} {u}" if u != "B" else f"{b} {u}"
-        b /= 1024
-    return f"{b:.2f} TB"
+from utils import human_size
 
 
 class HistoryWindow(QDialog):
@@ -162,7 +155,7 @@ class HistoryWindow(QDialog):
                 row, 2, QTableWidgetItem(f"{rec.peer_name}  ({rec.peer_host})")
             )
             self.table.setItem(row, 3, QTableWidgetItem(str(rec.num_files)))
-            self.table.setItem(row, 4, QTableWidgetItem(_fmt_size(rec.total_size)))
+            self.table.setItem(row, 4, QTableWidgetItem(human_size(rec.total_size)))
 
             speed = f"{rec.speed_mbps:.1f} MB/s" if rec.status == "completed" else "—"
             self.table.setItem(row, 5, QTableWidgetItem(speed))

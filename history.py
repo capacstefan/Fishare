@@ -3,6 +3,7 @@
 import json
 import logging
 import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from threading import RLock
 from typing import List, Optional
@@ -44,7 +45,7 @@ class TransferHistory:
 
     def __init__(self):
         self._lock = RLock()
-        self.records: List[TransferRecord] = []
+        self.records: deque = deque(maxlen=self.MAX_RECORDS)
         self.load()
 
     def load(self):
@@ -53,12 +54,15 @@ class TransferHistory:
             with self._lock:
                 with open(HISTORY_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self.records = [TransferRecord(**rec) for rec in data]
+                    self.records = deque(
+                        (TransferRecord(**rec) for rec in data),
+                        maxlen=self.MAX_RECORDS,
+                    )
         except (FileNotFoundError, json.JSONDecodeError):
-            self.records = []
+            self.records = deque(maxlen=self.MAX_RECORDS)
         except Exception as e:
             LOG.warning(f"Failed to load history: {e}")
-            self.records = []
+            self.records = deque(maxlen=self.MAX_RECORDS)
 
     def save(self):
         """Persist current history to disk."""
@@ -76,9 +80,7 @@ class TransferHistory:
 
     def add_record(self, record: TransferRecord):
         with self._lock:
-            self.records.insert(0, record)
-            if len(self.records) > self.MAX_RECORDS:
-                self.records = self.records[: self.MAX_RECORDS]
+            self.records.appendleft(record)  # newest first; deque maxlen handles eviction
             self.save()
 
     def delete_record(self, index: int):

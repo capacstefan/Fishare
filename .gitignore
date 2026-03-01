@@ -18,3 +18,12 @@ Downloads/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# C++ build artifacts
+cpp_engine/build/
+cpp_engine/_deps/
+cpp_engine/.cmake/
+*.pyd
+*.so
+*.dll
+*.dylib

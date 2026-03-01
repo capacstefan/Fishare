@@ -3,3 +3,15 @@ cryptography>=43.0.0
 
 # Phase 2: QUIC support (optional, fallback to TCP if not installed)
 aioquic>=0.9.20
+
+# ── C++ engine (optional, build-time only) ────────────────────────────────────
+# The cpp_engine module is compiled via:  python build_cpp.py
+# Runtime only requires the compiled .pyd/.so — pybind11 is not a runtime dep.
+#
+# Build prerequisites (NOT installed via pip):
+#   - CMake 3.18+
+#   - C++17 compiler (MSVC 2019+, GCC 9+, Clang 10+)
+#   - OpenSSL dev headers (via vcpkg, system package, or standalone installer)
+#   - pybind11 is fetched automatically by CMake FetchContent at build time
+#
+# See build_cpp.py --help for platform-specific setup instructions.

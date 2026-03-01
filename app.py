@@ -7,7 +7,8 @@ from PyQt6.QtWidgets import QApplication
 from config import Config, setup_logging
 from history import TransferHistory
 from main_window import FIshareQtApp
-from network import Advertiser, Scanner, TransferService
+from network import Advertiser, Scanner
+from transfer_service import TransferService
 from state import AppState
 
 
@@ -17,12 +18,11 @@ def main():
     state = AppState(cfg)
     history = TransferHistory()
 
-    # Create TransferService *before* Advertiser so we know which protocol
-    # servers actually started.  ui_root is set later once the window exists.
+    # Create TransferService before Advertiser so protocol servers start first
+    # ui_root is set later once the window exists
     transfer = TransferService(state, ui_root=None, history=history)
 
-    # Advertiser uses the same ProtocolSelector that TransferService already
-    # pruned — it only announces protocols whose servers are running.
+    # Advertiser uses the protocol_selector from TransferService
     advertiser = Advertiser(state, transfer.protocol_selector)
     scanner = Scanner(state)
     advertiser.start()
@@ -36,7 +36,7 @@ def main():
     try:
         ret = app.exec()
     finally:
-        window.transfer.stop()
+        transfer.stop()
         advertiser.stop()
         scanner.stop()
 
