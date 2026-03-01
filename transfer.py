@@ -39,6 +39,14 @@ LOG = logging.getLogger(__name__)
 # Import C++ engine (required for file transfers)
 try:
     import cpp_engine as _cpp
+    # Guard against the cpp_engine/ source directory being silently imported
+    # as a Python namespace package instead of the compiled extension.
+    if not (callable(getattr(_cpp, "send_file", None)) and
+            callable(getattr(_cpp, "recv_file", None))):
+        raise ImportError(
+            "cpp_engine loaded but send_file/recv_file are missing — "
+            "the extension was not compiled yet."
+        )
     LOG.info(f"cpp_engine {getattr(_cpp, '__version__', 'unknown')} loaded")
 except (ImportError, AttributeError) as e:
     LOG.critical(
