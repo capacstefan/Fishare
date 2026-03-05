@@ -28,16 +28,19 @@ find_package(OpenSSL REQUIRED)
 # Requires internet access during the first cmake configure run.
 include(FetchContent)
 
+
 FetchContent_Declare(
     pybind11
     GIT_REPOSITORY https://github.com/pybind/pybind11.git
-    GIT_TAG        v2.12.0   # pin to a stable release
+    GIT_TAG        v2.12.0
     GIT_SHALLOW    TRUE
 )
+set(PYBIND11_FINDPYTHON ON)   # ← ADD THIS LINE
 FetchContent_MakeAvailable(pybind11)
 
 # ── Source files ──────────────────────────────────────
 set(SOURCES
+    src/aead.cpp
     src/engine.cpp
     src/bindings.cpp
 )

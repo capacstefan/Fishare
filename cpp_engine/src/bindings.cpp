@@ -64,7 +64,7 @@ make_progress_cb(py::object py_cb) {
 }
 
 #ifdef _WIN32
-static sock_t to_sock(int64_t fd) { return reinterpret_cast<SOCKET>(fd); }
+static sock_t to_sock(int64_t fd) { return static_cast<SOCKET>(fd); }
 #else
 static sock_t to_sock(int64_t fd) { return static_cast<int>(fd); }
 #endif
@@ -72,7 +72,7 @@ static sock_t to_sock(int64_t fd) { return static_cast<int>(fd); }
 // â”€â”€ Module definition â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 PYBIND11_MODULE(cpp_engine, m) {
-    m.doc() = "FIshare C++ transfer engine — Simplified & Optimized";
+    m.doc() = "FIshare C++ transfer engine - Simplified & Optimized";
 
     // send_file(fd, path, fsize, key, nonce, cb, offset, total, chunk) -> uint64_t
     m.def(
