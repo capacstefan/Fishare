@@ -42,11 +42,11 @@ struct EvpCtx {
 // ── Public API ────────────────────────────────────────
 
 void nonce_from_counter(uint64_t counter, uint8_t nonce[AEAD_NONCE_LEN]) {
-    // 12 bytes big-endian; first 4 bytes are zero, last 8 encode the counter.
+    // 12 bytes big-endian: 4 zero bytes then the 8-byte counter.
     // Matches Python: n.to_bytes(12, "big")
-    std::memset(nonce, 0, AEAD_NONCE_LEN);
+    nonce[0] = nonce[1] = nonce[2] = nonce[3] = 0;
     for (int i = 7; i >= 0; --i) {
-        nonce[AEAD_NONCE_LEN - 1 - (7 - i)] = static_cast<uint8_t>(counter & 0xFF);
+        nonce[4 + i] = static_cast<uint8_t>(counter & 0xFF);
         counter >>= 8;
     }
 }

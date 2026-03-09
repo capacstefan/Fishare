@@ -97,17 +97,17 @@ class BaseTransferProtocol(TransferProtocol):
         """Return optimal chunk size for file of given size.
         
         < 512 KB  → one-shot read
-        < 10 MB   → 512 KB
-        < 100 MB  → 1 MB  
-        ≥ 100 MB  → 4 MB
+        < 10 MB   → 1 MB
+        < 100 MB  → 4 MB
+        ≥ 100 MB  → 16 MB
         """
         if fsize < 512 * 1024:
             return max(fsize, 1)
         if fsize < 10 * 1024 * 1024:
-            return 512 * 1024
-        if fsize < 100 * 1024 * 1024:
             return 1 * 1024 * 1024
-        return 4 * 1024 * 1024
+        if fsize < 100 * 1024 * 1024:
+            return 4 * 1024 * 1024
+        return 16 * 1024 * 1024
     
     @staticmethod
     def unique_path(path: str) -> str:
@@ -481,9 +481,7 @@ class TCPProtocol(BaseTransferProtocol):
     
     def _send_json(self, sock: socket.socket, obj: dict, aead: AEADStream):
         """Send JSON control message."""
-        data = json.dumps(obj).encode("utf-8")
-        if aead:
-            data = aead.encrypt(data)
+        data = aead.encrypt(json.dumps(obj).encode("utf-8"))
         sock.sendall(struct.pack(">I", len(data)) + data)
     
     def _recv_json(self, sock: socket.socket, aead: AEADStream) -> dict:
@@ -497,9 +495,7 @@ class TCPProtocol(BaseTransferProtocol):
         data = self._recvall(sock, length)
         if data is None:
             raise ConnectionError("Peer closed mid-frame")
-        if aead:
-            data = aead.decrypt(data)
-        return json.loads(data)
+        return json.loads(aead.decrypt(data))
     
     def _recvall(self, sock: socket.socket, n: int):
         """Read exactly n bytes using zero-copy recv_into."""

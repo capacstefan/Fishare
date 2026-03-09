@@ -1,5 +1,27 @@
 [
   {
+    "timestamp": 1773073309.761316,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 28,
+    "total_size": 364956490,
+    "duration": 7.947222709655762,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
+    "timestamp": 1773073274.9535084,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 28,
+    "total_size": 364956490,
+    "duration": 30.321967840194702,
+    "status": "rejected",
+    "error_msg": "Transfer rejected by peer"
+  },
+  {
     "timestamp": 1773072798.7839234,
     "direction": "received",
     "peer_name": "DESKTOP-CU2U3RT",

@@ -81,9 +81,10 @@ static void send_frame(sock_t sock, const uint8_t* data, size_t len,
     send_all(sock, frame_buf.data(), frame_buf.size());
 }
 
-static std::vector<uint8_t> recv_frame(sock_t sock,
-                                        const uint8_t key[AEAD_KEY_LEN],
-                                        uint64_t& nonce)
+static void recv_frame(sock_t sock,
+                       const uint8_t key[AEAD_KEY_LEN], uint64_t& nonce,
+                       std::vector<uint8_t>& cipher_buf,
+                       std::vector<uint8_t>& plain_buf)
 {
     // Read 4-byte length header
     uint8_t header[4];
@@ -95,16 +96,13 @@ static std::vector<uint8_t> recv_frame(sock_t sock,
     if (payload_len < AEAD_TAG_LEN)
         throw std::runtime_error("Frame too small");
     
-    // Receive encrypted payload + tag
-    std::vector<uint8_t> cipher_buf(payload_len);
+    // Reuse caller-supplied buffers — no heap allocation when capacity >= payload_len
+    cipher_buf.resize(payload_len);
     recv_exact(sock, cipher_buf.data(), payload_len);
     
-    // Decrypt and return plaintext
-    size_t plain_len = payload_len - AEAD_TAG_LEN;
-    std::vector<uint8_t> plain(plain_len);
-    aead_decrypt(key, nonce, cipher_buf.data(), payload_len, plain.data());
-    
-    return plain;
+    // Decrypt into reused output buffer
+    plain_buf.resize(payload_len - AEAD_TAG_LEN);
+    aead_decrypt(key, nonce, cipher_buf.data(), payload_len, plain_buf.data());
 }
 
 // ── File helpers (UTF-8 paths, cross-platform) ────────
@@ -226,18 +224,24 @@ uint64_t eng_recv_file(
     int64_t received = 0;
     auto last_progress = std::chrono::steady_clock::now();
     
+    // Pre-allocate recv buffers for the expected frame size once, reused every iteration.
+    size_t expected_chunk = static_cast<size_t>(std::min<int64_t>(fsize, 16 * 1024 * 1024));
+    std::vector<uint8_t> cipher_buf, plain_buf;
+    cipher_buf.reserve(expected_chunk + AEAD_TAG_LEN);
+    plain_buf.reserve(expected_chunk);
+    
     try {
         while (received < fsize) {
-            std::vector<uint8_t> chunk = recv_frame(sock, key, nonce);
+            recv_frame(sock, key, nonce, cipher_buf, plain_buf);
             
-            if (chunk.empty())
+            if (plain_buf.empty())
                 throw std::runtime_error("Received empty chunk");
             
-            size_t written = std::fwrite(chunk.data(), 1, chunk.size(), f);
-            if (written != chunk.size())
+            size_t written = std::fwrite(plain_buf.data(), 1, plain_buf.size(), f);
+            if (written != plain_buf.size())
                 throw std::runtime_error("Write error: " + dest_path);
             
-            received += static_cast<int64_t>(chunk.size());
+            received += static_cast<int64_t>(plain_buf.size());
             
             // Throttled progress callback
             if (progress_cb && grand_total > 0) {
