@@ -311,17 +311,23 @@ class TCPProtocol(BaseTransferProtocol):
                     with open(dest_path, "wb"):
                         pass
                 else:
-                    # C++ engine handles file receive
+                    # C++ engine handles file receive.
+                    # settimeout() puts the Windows SOCKET into non-blocking mode;
+                    # C++ ::recv() needs a blocking socket, so switch modes here.
                     def _recv_progress(b_done, b_total):
                         if app_state and total_size > 0:
                             app_state.update_progress(dev_id, b_done / total_size, b_done)
                     
-                    aead.recv_nonce = _cpp.recv_file(
-                        conn.fileno(), dest_path, fsize,
-                        aead.key, aead.recv_nonce,
-                        _recv_progress if app_state else None,
-                        received_total, total_size
-                    )
+                    conn.setblocking(True)
+                    try:
+                        aead.recv_nonce = _cpp.recv_file(
+                            conn.fileno(), dest_path, fsize,
+                            aead.key, aead.recv_nonce,
+                            _recv_progress if app_state else None,
+                            received_total, total_size
+                        )
+                    finally:
+                        conn.settimeout(self.TRANSFER_TIMEOUT)
                     received_total += fsize
                 
                 current_dest_path = None
@@ -430,13 +436,19 @@ class TCPProtocol(BaseTransferProtocol):
                 if fsize == 0:
                     continue
                 
-                # C++ engine handles file send
-                aead.send_nonce = _cpp.send_file(
-                    sock.fileno(), file_path, fsize,
-                    aead.key, aead.send_nonce,
-                    progress_callback,
-                    sent_total, total_size, chunk_size
-                )
+                # C++ engine handles file send.
+                # settimeout() puts the Windows SOCKET into non-blocking mode;
+                # C++ ::send() needs a blocking socket, so switch modes here.
+                sock.setblocking(True)
+                try:
+                    aead.send_nonce = _cpp.send_file(
+                        sock.fileno(), file_path, fsize,
+                        aead.key, aead.send_nonce,
+                        progress_callback,
+                        sent_total, total_size, chunk_size
+                    )
+                finally:
+                    sock.settimeout(self.TRANSFER_TIMEOUT)
                 sent_total += fsize
             
             LOG.info(f"TCP transfer complete: {len(valid_files)} files, {total_size} bytes")

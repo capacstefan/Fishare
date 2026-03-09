@@ -1,5 +1,49 @@
 [
   {
+    "timestamp": 1773072798.7839234,
+    "direction": "received",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 7,
+    "total_size": 275247616,
+    "duration": 0.015848159790039062,
+    "status": "error",
+    "error_msg": "recv() failed"
+  },
+  {
+    "timestamp": 1773072712.13175,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 10,
+    "total_size": 288012653,
+    "duration": 2.2840678691864014,
+    "status": "rejected",
+    "error_msg": "Transfer rejected by peer"
+  },
+  {
+    "timestamp": 1773072704.2787316,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 10,
+    "total_size": 288012653,
+    "duration": 2.349761724472046,
+    "status": "rejected",
+    "error_msg": "Transfer rejected by peer"
+  },
+  {
+    "timestamp": 1773072695.2410645,
+    "direction": "sent",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 10,
+    "total_size": 288012653,
+    "duration": 4.081875562667847,
+    "status": "rejected",
+    "error_msg": "Transfer rejected by peer"
+  },
+  {
     "timestamp": 1772319362.9248512,
     "direction": "sent",
     "peer_name": "DESKTOP-CU2U3RT",
