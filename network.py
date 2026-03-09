@@ -203,6 +203,8 @@ class Scanner:
                 # Filter out self-advertisements
                 adv_host = payload.get("host") or addr[0]
                 adv_port = int(payload.get("port", 0))
+                if not (1 <= adv_port <= 65535):
+                    continue
 
                 if adv_host == self._local_ip and adv_port == self.state.cfg.listen_port:
                     continue
@@ -229,7 +231,7 @@ class Scanner:
                 # Create/update device
                 device = Device(
                     device_id=f"{adv_host}:{adv_port}",
-                    name=payload.get("name", "Unknown"),
+                    name=payload.get("name", "Unknown")[:64],
                     host=adv_host,
                     port=adv_port,
                     status=status,

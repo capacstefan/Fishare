@@ -229,7 +229,7 @@ class TransferService:
             return False
         
         # Re-resolve device from live state
-        live_device = self.state.devices.get(device.device_id)
+        live_device = self.state.snapshot_devices().get(device.device_id)
         if live_device is None:
             LOG.warning(f"Device {device.name} no longer in state")
             return False

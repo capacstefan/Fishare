@@ -159,7 +159,8 @@ uint64_t eng_send_file(
     
     // Pre-allocate buffers (reused for all chunks - zero extra allocs)
     std::vector<uint8_t> read_buf(static_cast<size_t>(chunk_size));
-    std::vector<uint8_t> frame_buf;  // sized by send_frame
+    std::vector<uint8_t> frame_buf;
+    frame_buf.reserve(4 + static_cast<size_t>(chunk_size) + AEAD_TAG_LEN);
     
     int64_t sent = 0;
     auto last_progress = std::chrono::steady_clock::now();

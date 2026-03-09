@@ -86,6 +86,7 @@ class BaseTransferProtocol(TransferProtocol):
     CONNECT_TIMEOUT = 10.0
     TRANSFER_TIMEOUT = 60.0
     MAX_CONCURRENT = 8
+    MAX_FILES_PER_TRANSFER = 1000
     
     def __init__(self, identity, cfg):
         super().__init__(identity, cfg)
@@ -256,6 +257,10 @@ class TCPProtocol(BaseTransferProtocol):
             
             if not files:
                 self._send_json(conn, {"accept": False, "error": "No files"}, aead)
+                return
+            
+            if len(files) > self.MAX_FILES_PER_TRANSFER:
+                self._send_json(conn, {"accept": False, "error": f"Too many files (max {self.MAX_FILES_PER_TRANSFER})"}, aead)
                 return
             
             # Ask handler for acceptance
@@ -774,6 +779,11 @@ if QUIC_AVAILABLE:
                     total_size = int(msg.get("total", 0))
                     dev_id = f"quic-{self._quic.host_cid.hex()[:8]}"
                     
+                    if len(files) > TCPProtocol.MAX_FILES_PER_TRANSFER:
+                        LOG.warning(f"QUIC: too many files ({len(files)}) — rejecting")
+                        self._send_reject(stream_id)
+                        return
+                    
                     # ── Ed25519 identity check ─────────────────────────
                     identity_key_b64 = msg.get("identity_key")
                     identity_sig_b64 = msg.get("identity_sig")
@@ -839,6 +849,7 @@ if QUIC_AVAILABLE:
             
             try:
                 data = bytes(self._buffer[stream_id])
+                del self._buffer[stream_id]  # free large byte buffer immediately
                 
                 # First line is JSON metadata, the rest is raw file bytes.
                 lines = data.split(b'\n', 1)
