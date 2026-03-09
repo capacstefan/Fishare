@@ -15,6 +15,7 @@ CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 LOG_FILE = os.path.join(DATA_DIR, "fishare.log")
 KEY_FILE = os.path.join(DATA_DIR, "id_ed25519.pem")
 HISTORY_FILE = os.path.join(DATA_DIR, "transfer_history.json")
+KNOWN_PEERS_FILE = os.path.join(DATA_DIR, "known_peers.json")
 
 
 def _load_config(defaults: dict) -> dict:

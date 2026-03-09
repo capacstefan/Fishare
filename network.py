@@ -263,7 +263,8 @@ class TransferRequestEvent(QEvent):
         num_files: int,
         total_size: int,
         result: dict,
-        ready: threading.Event
+        ready: threading.Event,
+        is_new_device: bool = False,
     ):
         super().__init__(self._TYPE)
         self.peer_name = peer_name
@@ -271,3 +272,21 @@ class TransferRequestEvent(QEvent):
         self.total_size = total_size
         self.result = result
         self.ready = ready
+        self.is_new_device = is_new_device
+
+
+class SecurityWarningEvent(QEvent):
+    """Posted to main window to display a key-mismatch security alert.
+
+    Carries device_id and the known_peers store so the UI can offer a
+    Re-trust button that forgets the stored key (recovering from reinstalls).
+    """
+
+    _TYPE = QEvent.Type(QEvent.registerEventType())
+
+    def __init__(self, title: str, message: str, device_id: str = "", known_peers=None):
+        super().__init__(self._TYPE)
+        self.title = title
+        self.message = message
+        self.device_id = device_id
+        self.known_peers = known_peers

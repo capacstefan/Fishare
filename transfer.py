@@ -80,7 +80,7 @@ class BaseTransferProtocol(TransferProtocol):
     """Base class with shared logic for TCP and QUIC protocols."""
     
     # Protocol constants
-    PROTO_VERSION = 2
+    PROTO_VERSION = 3
     MAX_FRAME_SIZE = 100 * 1024 * 1024
     SOCKET_BUFFER_SIZE = 8 * 1024 * 1024
     CONNECT_TIMEOUT = 10.0
@@ -236,8 +236,10 @@ class TCPProtocol(BaseTransferProtocol):
         history_obj = None
         
         try:
-            # Key exchange
-            aead = key_agree(conn, self.identity.sign)
+            # Key exchange — always exchanges and verifies Ed25519 identity keys
+            aead, peer_identity_pub = key_agree(
+                conn, self.identity.sign, self.identity.public_bytes()
+            )
             
             # Receive request
             req = self._recv_json(conn, aead)
@@ -276,6 +278,7 @@ class TCPProtocol(BaseTransferProtocol):
                 "aead": aead,
                 "files": files,
                 "total_size": total_size,
+                "peer_identity_pub": peer_identity_pub,
             }
             
             result = self._handler_callback(conn_info, files, total_size)
@@ -413,7 +416,8 @@ class TCPProtocol(BaseTransferProtocol):
             sock = socket.create_connection((host, port), timeout=self.CONNECT_TIMEOUT)
             self._optimize_socket(sock)
             
-            aead = key_agree(sock, self.identity.sign)
+            # Key exchange — identity key is sent so the receiver can do TOFU
+            aead, _ = key_agree(sock, self.identity.sign, self.identity.public_bytes())
             
             files_rel = [os.path.basename(f) for f in valid_files]
             self._send_json(sock, {

@@ -84,37 +84,59 @@ def _recv_exact(sock, n: int) -> bytes:
     return bytes(buf)
 
 
-def key_agree(sock, sign_func, peer_pub=None) -> AEADStream:
-    """Ephemeral ECDH key-agreement with signed public keys.
+def key_agree(sock, sign_func, my_identity_pub: bytes) -> tuple:
+    """Ephemeral ECDH key-agreement with mutual identity key exchange.
 
-    Uses _recv_exact to guarantee full reads (fixes partial-recv bug).
+    Wire format (both sides send in this order):
+      [2-byte X25519 len] [32-byte X25519 pub]
+      [2-byte identity len] [32-byte Ed25519 identity pub]
+      [2-byte sig len] [64-byte Ed25519 signature of X25519 pub]
+
+    The signature is ALWAYS verified against the received identity key,
+    guaranteeing the peer controls the private key matching the identity pub
+    they claim.  The caller is responsible for TOFU-checking the returned
+    identity key against its own trust store.
+
+    Returns:
+        (AEADStream, peer_identity_pub_bytes)
     """
-    # X25519 raw public key = 32 bytes; Ed25519 signature = 64 bytes (fixed sizes)
     X25519_KEY_LEN = 32
+    ED25519_PUB_LEN = 32
     ED25519_SIG_LEN = 64
 
     my_priv = X25519PrivateKey.generate()
     my_pub_bytes = my_priv.public_key().public_bytes_raw()
 
     sig = sign_func(my_pub_bytes)
+
+    # Send our X25519 pub, Ed25519 identity pub, and signature
     sock.sendall(len(my_pub_bytes).to_bytes(2, "big") + my_pub_bytes)
+    sock.sendall(len(my_identity_pub).to_bytes(2, "big") + my_identity_pub)
     sock.sendall(len(sig).to_bytes(2, "big") + sig)
 
-    # Receive peer ephemeral pub + sig (exact reads)
+    # Receive peer X25519 pub
     plen = int.from_bytes(_recv_exact(sock, 2), "big")
     if plen != X25519_KEY_LEN:
-        raise ValueError(f"Unexpected key length from peer: {plen} (expected {X25519_KEY_LEN})")
+        raise ValueError(f"Bad X25519 key length from peer: {plen}")
     peer_pub_bytes = _recv_exact(sock, plen)
 
+    # Receive peer Ed25519 identity pub
+    ilen = int.from_bytes(_recv_exact(sock, 2), "big")
+    if ilen != ED25519_PUB_LEN:
+        raise ValueError(f"Bad identity key length from peer: {ilen}")
+    peer_identity_pub = _recv_exact(sock, ilen)
+
+    # Receive peer signature
     slen = int.from_bytes(_recv_exact(sock, 2), "big")
     if slen != ED25519_SIG_LEN:
-        raise ValueError(f"Unexpected signature length from peer: {slen} (expected {ED25519_SIG_LEN})")
+        raise ValueError(f"Bad signature length from peer: {slen}")
     peer_sig = _recv_exact(sock, slen)
 
-    if peer_pub:
-        ed25519.Ed25519PublicKey.from_public_bytes(peer_pub).verify(
-            peer_sig, peer_pub_bytes
-        )
+    # Always verify: the peer must own the private key matching the identity
+    # key they sent.  This proves possession; TOFU checks history separately.
+    ed25519.Ed25519PublicKey.from_public_bytes(peer_identity_pub).verify(
+        peer_sig, peer_pub_bytes
+    )
 
     peer_key = X25519PublicKey.from_public_bytes(peer_pub_bytes)
     shared = my_priv.exchange(peer_key)
@@ -126,7 +148,7 @@ def key_agree(sock, sign_func, peer_pub=None) -> AEADStream:
         info=b"FIshare-key-v1",
     ).derive(shared)
 
-    return AEADStream(key)
+    return AEADStream(key), bytes(peer_identity_pub)
 
 
 class Identity:

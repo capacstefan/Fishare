@@ -4,8 +4,9 @@ import sys
 
 from PyQt6.QtWidgets import QApplication
 
-from config import Config, setup_logging
+from config import Config, setup_logging, KNOWN_PEERS_FILE
 from history import TransferHistory
+from known_peers import KnownPeers
 from main_window import FIshareQtApp
 from network import Advertiser, Scanner
 from transfer_service import TransferService
@@ -17,10 +18,11 @@ def main():
     cfg = Config.load()
     state = AppState(cfg)
     history = TransferHistory()
+    known_peers = KnownPeers(KNOWN_PEERS_FILE)
 
     # Create TransferService before Advertiser so protocol servers start first
     # ui_root is set later once the window exists
-    transfer = TransferService(state, ui_root=None, history=history)
+    transfer = TransferService(state, ui_root=None, history=history, known_peers=known_peers)
 
     # Advertiser uses the protocol_selector from TransferService
     advertiser = Advertiser(state, transfer.protocol_selector)

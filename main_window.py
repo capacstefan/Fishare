@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import Dict, List
+
+LOG = logging.getLogger(__name__)
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QFont
@@ -28,7 +31,7 @@ from PyQt6.QtWidgets import (
 )
 
 from history_window import HistoryWindow
-from network import TransferRequestEvent
+from network import SecurityWarningEvent, TransferRequestEvent
 from transfer_service import TransferService
 from state import AppStatus, TransferStatus
 from utils import human_size
@@ -678,14 +681,36 @@ class FIshareQtApp(QMainWindow):
         if isinstance(e, TransferRequestEvent):
             self._on_incoming(e)
             return True
+        if isinstance(e, SecurityWarningEvent):
+            self._on_security_warning(e)
+            return True
         return super().event(e)
+
+    def _on_security_warning(self, ev: SecurityWarningEvent):
+        """Show key-mismatch dialog with optional Re-trust button."""
+        dialog = QMessageBox(QMessageBox.Icon.Critical, ev.title, ev.message, parent=self)
+        block_btn = dialog.addButton("Keep Blocked", QMessageBox.ButtonRole.RejectRole)
+        retrust_btn = None
+        if ev.device_id and ev.known_peers is not None:
+            retrust_btn = dialog.addButton("Re-trust Device", QMessageBox.ButtonRole.AcceptRole)
+        dialog.setDefaultButton(block_btn)
+        dialog.exec()
+        if dialog.clickedButton() is retrust_btn:
+            ev.known_peers.forget(ev.device_id)
+            LOG.info(f"User chose to re-trust device {ev.device_id}; key forgotten")
 
     def _on_incoming(self, ev: TransferRequestEvent):
         """Handle incoming transfer with auto-timeout dialog."""
         size_str = human_size(ev.total_size)
+        new_device_line = (
+            "\n\n\u26a0\ufe0f  First time seeing this device — "
+            "verify you recognise them before accepting."
+            if ev.is_new_device else ""
+        )
         msg = (
             f"{ev.peer_name} wants to send {ev.num_files} file(s)\n"
-            f"Total size: {size_str}\n\nAccept?"
+            f"Total size: {size_str}"
+            f"{new_device_line}\n\nAccept?"
         )
         
         # Create dialog with timeout

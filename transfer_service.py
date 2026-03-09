@@ -37,10 +37,11 @@ class TransferService:
     # Errors where retry is pointless
     NON_RETRIABLE = (ConnectionResetError, ConnectionRefusedError, PermissionError)
     
-    def __init__(self, state: AppState, ui_root=None, history: TransferHistory = None):
+    def __init__(self, state: AppState, ui_root=None, history: TransferHistory = None, known_peers=None):
         self.state = state
         self.ui_root = ui_root
         self.history = history
+        self.known_peers = known_peers  # KnownPeers instance (may be None)
         
         # Initialize identity
         identity = Identity()
@@ -110,12 +111,34 @@ class TransferService:
         """
         peer_name = conn_info.get("peer_name", "Unknown")
         dev_id = conn_info.get("dev_id")
+        peer_identity_pub = conn_info.get("peer_identity_pub")  # bytes | None
         
-        # Ask user for acceptance
-        accepted = self._ask_user_accept(peer_name, len(files), total_size)
+        # ── TOFU / key-mismatch check ────────────────────────────────────────
+        is_new_device = False
+        if self.known_peers is not None and peer_identity_pub is not None:
+            tofu_status = self.known_peers.check(dev_id, peer_identity_pub)
+            
+            if tofu_status == "mismatch":
+                LOG.warning(
+                    f"SECURITY: identity key mismatch for '{peer_name}' "
+                    f"({dev_id}) — blocking transfer (possible MITM)"
+                )
+                self._notify_key_mismatch(peer_name, dev_id)
+                return (False, None, None, time.time())
+            
+            is_new_device = (tofu_status == "unknown")
+        # ────────────────────────────────────────────────────────────────────
+        
+        # Ask user for acceptance (include new-device note in dialog if needed)
+        accepted = self._ask_user_accept(peer_name, len(files), total_size, is_new_device)
         if not accepted:
             LOG.info(f"Transfer from {peer_name} rejected")
             return (False, None, None, time.time())
+        
+        # User accepted — persist TOFU trust if this was a first-time device
+        if is_new_device and self.known_peers is not None and peer_identity_pub is not None:
+            self.known_peers.trust(dev_id, peer_identity_pub)
+            LOG.info(f"Trusted new device '{peer_name}' ({dev_id})")
         
         # Track transfer
         self.state.start_transfer(dev_id)
@@ -123,7 +146,7 @@ class TransferService:
         
         return (True, self.state, self.history, start_time)
     
-    def _ask_user_accept(self, peer_name: str, num_files: int, total_size: int) -> bool:
+    def _ask_user_accept(self, peer_name: str, num_files: int, total_size: int, is_new_device: bool = False) -> bool:
         """Prompt user to accept incoming transfer.
         
         Blocks until user responds or timeout expires.
@@ -138,7 +161,7 @@ class TransferService:
         ready = threading.Event()
         
         from network import TransferRequestEvent
-        event = TransferRequestEvent(peer_name, num_files, total_size, result, ready)
+        event = TransferRequestEvent(peer_name, num_files, total_size, result, ready, is_new_device)
         
         from PyQt6.QtWidgets import QApplication
         app = QApplication.instance()
@@ -152,6 +175,31 @@ class TransferService:
         
         LOG.warning(f"Transfer acceptance timeout for {peer_name}")
         return False
+    
+    def _notify_key_mismatch(self, peer_name: str, device_id: str) -> None:
+        """Post a security warning to the UI (fire-and-forget)."""
+        if not self.ui_root:
+            return
+        from network import SecurityWarningEvent
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app:
+            msg = (
+                f"The identity key of device \u2018{peer_name}\u2019 has changed.\n\n"
+                f"This may indicate a man-in-the-middle attack, or the device "
+                f"may have simply reinstalled FIshare.\n\n"
+                f"The incoming transfer has been blocked.\n\n"
+                f"If you trust this device (e.g. they reinstalled the app), "
+                f"click \u2018Re-trust\u2019 and ask them to send again."
+            )
+            app.postEvent(
+                self.ui_root,
+                SecurityWarningEvent(
+                    "\u26a0\ufe0f Security Warning", msg,
+                    device_id=device_id,
+                    known_peers=self.known_peers,
+                ),
+            )
     
     # ══════════════════════════════════════════════════
     #  Outgoing Transfers
