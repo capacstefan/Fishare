@@ -36,6 +36,32 @@ from state import TransferStatus
 
 LOG = logging.getLogger(__name__)
 
+
+def _record_receive(
+    history_obj,
+    start_time: float,
+    peer_name: str,
+    peer_host: str,
+    num_files: int,
+    total_size: int,
+    duration: float,
+    status: TransferStatus,
+    error_msg: Optional[str] = None,
+) -> None:
+    if not history_obj or start_time is None:
+        return
+    history_obj.add_record(TransferRecord(
+        timestamp=start_time,
+        direction="received",
+        peer_name=peer_name,
+        peer_host=peer_host,
+        num_files=num_files,
+        total_size=total_size,
+        duration=duration,
+        status=status.value,
+        error_msg=error_msg,
+    ))
+
 # Import C++ engine (required for file transfers)
 try:
     import cpp_engine as _cpp
@@ -122,6 +148,20 @@ class BaseTransferProtocol(TransferProtocol):
             if not os.path.exists(candidate):
                 return candidate
             n += 1
+
+    @classmethod
+    def validate_request(cls, proto_ver: int, files: list) -> Optional[str]:
+        """Return an error string if the request is invalid, else None."""
+        if proto_ver != cls.PROTO_VERSION:
+            return (
+                "Protocol version mismatch "
+                f"(peer: {proto_ver}, local: {cls.PROTO_VERSION})"
+            )
+        if not files:
+            return "No files"
+        if len(files) > cls.MAX_FILES_PER_TRANSFER:
+            return f"Too many files (max {cls.MAX_FILES_PER_TRANSFER})"
+        return None
 
 
 # ═══════════════════════════════════════════════════════
@@ -247,22 +287,12 @@ class TCPProtocol(BaseTransferProtocol):
             peer_name = req.get("peer_name", "Unknown")
             proto_ver = req.get("proto_version", 1)
             
-            if proto_ver != self.PROTO_VERSION:
-                self._send_json(conn, {
-                    "accept": False,
-                    "error": f"Protocol version mismatch (peer: {proto_ver}, local: {self.PROTO_VERSION})"
-                }, aead)
-                return
-            
             files = req.get("files", [])
             total_size = int(req.get("total", 0))
-            
-            if not files:
-                self._send_json(conn, {"accept": False, "error": "No files"}, aead)
-                return
-            
-            if len(files) > self.MAX_FILES_PER_TRANSFER:
-                self._send_json(conn, {"accept": False, "error": f"Too many files (max {self.MAX_FILES_PER_TRANSFER})"}, aead)
+
+            err = self.validate_request(proto_ver, files)
+            if err:
+                self._send_json(conn, {"accept": False, "error": err}, aead)
                 return
             
             # Ask handler for acceptance
@@ -348,16 +378,16 @@ class TCPProtocol(BaseTransferProtocol):
                 app_state.update_progress(dev_id, 1.0, received_total)
                 
                 if history_obj:
-                    history_obj.add_record(TransferRecord(
-                        timestamp=start_time,
-                        direction="received",
-                        peer_name=peer_name,
-                        peer_host=addr[0],
-                        num_files=len(files),
-                        total_size=total_size,
-                        duration=duration,
-                        status=TransferStatus.COMPLETED.value,
-                    ))
+                    _record_receive(
+                        history_obj,
+                        start_time,
+                        peer_name,
+                        addr[0],
+                        len(files),
+                        total_size,
+                        duration,
+                        TransferStatus.COMPLETED,
+                    )
                 
                 app_state.schedule_clear_progress(dev_id, 2.0)
         
@@ -375,17 +405,17 @@ class TCPProtocol(BaseTransferProtocol):
             # Record failure
             if app_state and history_obj:
                 try:
-                    history_obj.add_record(TransferRecord(
-                        timestamp=start_time,
-                        direction="received",
-                        peer_name=peer_name,
-                        peer_host=addr[0],
-                        num_files=len(files),
-                        total_size=total_size,
-                        duration=time.time() - start_time,
-                        status=TransferStatus.ERROR.value,
+                    _record_receive(
+                        history_obj,
+                        start_time,
+                        peer_name,
+                        addr[0],
+                        len(files),
+                        total_size,
+                        time.time() - start_time,
+                        TransferStatus.ERROR,
                         error_msg=str(e),
-                    ))
+                    )
                 except Exception:
                     pass
             
@@ -706,7 +736,8 @@ class QUICProtocol(BaseTransferProtocol):
                 create_protocol=lambda *args: FIshareQUICClientProtocol(
                     *args,
                     identity=self.identity,
-                    device_name=self.cfg.device_name
+                    device_name=self.cfg.device_name,
+                    listen_port=self.cfg.listen_port,
                 ),
             ) as client:
                 await client.send_files(files, progress_callback, total_size)
@@ -732,20 +763,24 @@ if QUIC_AVAILABLE:
             self._handler = handler
             self._config = config
             self._identity = identity
-            self._streams = {}
-            self._metadata = {}
             self._files_to_receive = 0
             self._files_received = 0
             self._buffer = {}
+            self._stream_states = {}
             self._accepted = False
+            self._error = False
+            self._error_msg = ""
+            self._finalized = False
             # Populated after handler accepts — used for progress & history.
             self._state = None
             self._history = None
             self._start_time = None
             self._dev_id = None
             self._peer_name = "Unknown"
+            self._peer_host = ""
             self._total_size = 0
             self._received_bytes = 0
+            self._last_progress_ts = 0.0
         
         def quic_event_received(self, event):
             """Handle QUIC events."""
@@ -756,17 +791,14 @@ if QUIC_AVAILABLE:
                 stream_id = event.stream_id
                 data = event.data
                 end_stream = event.end_stream
-                
-                # Accumulate stream data
-                if stream_id not in self._buffer:
-                    self._buffer[stream_id] = bytearray()
-                self._buffer[stream_id].extend(data)
-                
-                # Process complete messages
+
                 if stream_id == 0:  # Control stream
+                    if stream_id not in self._buffer:
+                        self._buffer[stream_id] = bytearray()
+                    self._buffer[stream_id].extend(data)
                     self._handle_control_stream(stream_id, end_stream)
-                elif end_stream:
-                    self._handle_file_stream(stream_id)
+                else:
+                    self._handle_file_stream_data(stream_id, data, end_stream)
     
         def _handle_control_stream(self, stream_id, end_stream):
             """Handle control messages on stream 0."""
@@ -774,26 +806,48 @@ if QUIC_AVAILABLE:
                 return
             
             try:
-                data = bytes(self._buffer[stream_id])
+                data = bytes(self._buffer.get(stream_id, b""))
+                self._buffer.pop(stream_id, None)
                 msg = json.loads(data.decode("utf-8"))
                 
                 if msg.get("type") == "send_request":
                     peer_name = msg.get("peer_name", "Unknown")
                     files = msg.get("files", [])
                     total_size = int(msg.get("total", 0))
-                    dev_id = f"quic-{self._quic.host_cid.hex()[:8]}"
-                    
-                    if len(files) > TCPProtocol.MAX_FILES_PER_TRANSFER:
-                        LOG.warning(f"QUIC: too many files ({len(files)}) — rejecting")
-                        self._send_reject(stream_id)
+                    proto_ver = int(msg.get("proto_version", 1))
+
+                    err = BaseTransferProtocol.validate_request(proto_ver, files)
+                    if err:
+                        self._send_reject(stream_id, error=err)
                         return
+
+                    peer_addr = None
+                    peer_host = ""
+                    try:
+                        if self._stream_transport:
+                            peer_addr = self._stream_transport.get_extra_info("peername")
+                    except Exception:
+                        peer_addr = None
+                    if isinstance(peer_addr, tuple) and peer_addr:
+                        peer_host = peer_addr[0]
+
+                    peer_port = msg.get("listen_port", msg.get("peer_port"))
+                    peer_listen_port = 0
+                    try:
+                        peer_listen_port = int(peer_port)
+                    except (TypeError, ValueError):
+                        peer_listen_port = 0
+                    if not (1 <= peer_listen_port <= 65535):
+                        peer_listen_port = self._config.listen_port
+
+                    dev_id = f"{peer_host or 'unknown'}:{peer_listen_port}"
                     
                     # ── Ed25519 identity check ─────────────────────────
                     identity_key_b64 = msg.get("identity_key")
                     identity_sig_b64 = msg.get("identity_sig")
                     if not identity_key_b64 or not identity_sig_b64:
                         LOG.warning("QUIC: peer sent no identity proof — rejecting")
-                        self._send_reject(stream_id)
+                        self._send_reject(stream_id, error="Missing identity proof")
                         return
                     try:
                         peer_pub = base64.b64decode(identity_key_b64)
@@ -803,15 +857,18 @@ if QUIC_AVAILABLE:
                         )
                     except Exception as exc:
                         LOG.warning(f"QUIC: identity verification failed: {exc}")
-                        self._send_reject(stream_id)
+                        self._send_reject(stream_id, error="Identity verification failed")
                         return
                     # ─────────────────────────────────────────────────
                     
                     conn_info = {
                         "dev_id": dev_id,
                         "peer_name": peer_name,
+                        "peer_host": peer_host,
+                        "addr": peer_addr,
                         "files": files,
                         "total_size": total_size,
+                        "peer_identity_pub": peer_pub,
                     }
                     
                     if self._handler:
@@ -825,6 +882,7 @@ if QUIC_AVAILABLE:
                                 self._start_time = start_time
                                 self._dev_id = dev_id
                                 self._peer_name = peer_name
+                                self._peer_host = peer_host
                                 self._total_size = total_size
                         else:
                             self._accepted = result
@@ -840,87 +898,255 @@ if QUIC_AVAILABLE:
             except Exception as e:
                 LOG.error(f"QUIC control stream error: {e}")
         
-        def _send_reject(self, stream_id: int):
+        def _send_reject(self, stream_id: int, error: Optional[str] = None):
             """Send a rejection response on the control stream."""
-            resp_data = json.dumps({"accept": False}).encode("utf-8")
+            payload = {"accept": False}
+            if error:
+                payload["error"] = error
+            self._accepted = False
+            resp_data = json.dumps(payload).encode("utf-8")
             self._quic.send_stream_data(stream_id + 1, resp_data, end_stream=True)
             self.transmit()
         
-        def _handle_file_stream(self, stream_id):
-            """Handle file data stream."""
+        def _handle_file_stream_data(self, stream_id, data: bytes, end_stream: bool):
+            """Handle streaming file data on a per-stream basis."""
             if not self._accepted:
                 return
-            
+
+            state = self._stream_states.get(stream_id)
+            if state is None:
+                state = {
+                    "header": bytearray(),
+                    "meta_done": False,
+                    "file": None,
+                    "dest_path": None,
+                    "expected": None,
+                    "received": 0,
+                    "discard": False,
+                    "file_name": "",
+                    "error": None,
+                }
+                self._stream_states[stream_id] = state
+
             try:
-                data = bytes(self._buffer[stream_id])
-                del self._buffer[stream_id]  # free large byte buffer immediately
-                
-                # First line is JSON metadata, the rest is raw file bytes.
-                lines = data.split(b'\n', 1)
-                if len(lines) < 2:
-                    LOG.error("QUIC: invalid file stream format")
-                    return
-                
-                meta = json.loads(lines[0].decode("utf-8"))
-                file_data = lines[1]
-                
-                fname = os.path.basename(meta.get("file", "unnamed")) or "unnamed"
-                fsize = len(file_data)
-                
-                # Path traversal check — identical to the TCP code path.
-                download_dir = self._config.download_dir
-                os.makedirs(download_dir, exist_ok=True)
-                download_dir_abs = os.path.abspath(download_dir)
-                dest_path = os.path.abspath(os.path.join(download_dir, fname))
-                if not dest_path.startswith(download_dir_abs + os.sep) and dest_path != download_dir_abs:
-                    LOG.error(f"QUIC: path traversal blocked: {fname!r}")
-                    return
-                
-                dest_path = BaseTransferProtocol.unique_path(dest_path)
-                with open(dest_path, "wb") as f:
-                    f.write(file_data)
-                
-                self._files_received += 1
-                self._received_bytes += fsize
-                LOG.info(f"QUIC received: {fname} ({fsize} bytes) [{self._files_received}/{self._files_to_receive}]")
-                
-                # Progress tracking
-                if self._state and self._total_size > 0:
-                    self._state.update_progress(
-                        self._dev_id,
-                        self._received_bytes / self._total_size,
-                        self._received_bytes,
-                    )
-                
-                # On last file: write history and schedule cleanup.
-                if self._files_received >= self._files_to_receive:
-                    if self._state:
-                        self._state.update_progress(self._dev_id, 1.0, self._total_size)
-                        if self._history and self._start_time is not None:
-                            from history import TransferRecord
-                            self._history.add_record(TransferRecord(
-                                timestamp=self._start_time,
-                                direction="received",
-                                peer_name=self._peer_name,
-                                peer_host="",
-                                num_files=self._files_to_receive,
-                                total_size=self._total_size,
-                                duration=time.time() - self._start_time,
-                                status="completed",
-                            ))
-                        self._state.schedule_clear_progress(self._dev_id, 2.0)
-            
+                if not state["meta_done"]:
+                    state["header"].extend(data)
+                    header_buf = state["header"]
+                    idx = header_buf.find(b"\n")
+                    if idx == -1:
+                        if end_stream:
+                            self._mark_stream_error(stream_id, state, "Missing file header")
+                            self._finalize_stream(stream_id)
+                        return
+
+                    header_line = bytes(header_buf[:idx])
+                    rest = bytes(header_buf[idx + 1 :])
+                    state["header"].clear()
+
+                    if not self._init_stream_from_header(stream_id, state, header_line):
+                        if end_stream:
+                            self._finalize_stream(stream_id)
+                        return
+
+                    if rest:
+                        self._write_stream_bytes(stream_id, state, rest)
+                else:
+                    if data:
+                        self._write_stream_bytes(stream_id, state, data)
+
+                if end_stream:
+                    self._finalize_stream(stream_id)
+
             except Exception as e:
-                LOG.error(f"QUIC file stream error: {e}")
+                self._mark_stream_error(stream_id, state, f"Stream error: {e}")
+                self._finalize_stream(stream_id)
+
+        def _init_stream_from_header(self, stream_id, state: dict, header_line: bytes) -> bool:
+            """Parse header metadata and open destination file."""
+            try:
+                meta = json.loads(header_line.decode("utf-8"))
+            except Exception as e:
+                self._mark_stream_error(stream_id, state, f"Invalid header JSON: {e}")
+                return False
+
+            fname = os.path.basename(meta.get("file", "unnamed")) or "unnamed"
+            try:
+                expected = int(meta.get("size", 0))
+            except Exception:
+                expected = -1
+
+            if expected < 0:
+                self._mark_stream_error(stream_id, state, "Invalid file size")
+                return False
+
+            download_dir = self._config.download_dir
+            os.makedirs(download_dir, exist_ok=True)
+            download_dir_abs = os.path.abspath(download_dir)
+            dest_path = os.path.abspath(os.path.join(download_dir, fname))
+            if not dest_path.startswith(download_dir_abs + os.sep) and dest_path != download_dir_abs:
+                self._mark_stream_error(stream_id, state, f"Path traversal blocked: {fname!r}")
+                return False
+
+            dest_path = BaseTransferProtocol.unique_path(dest_path)
+            state["file_name"] = fname
+            state["dest_path"] = dest_path
+            state["expected"] = expected
+            state["meta_done"] = True
+
+            if expected == 0:
+                try:
+                    with open(dest_path, "wb"):
+                        pass
+                except Exception as e:
+                    self._mark_stream_error(stream_id, state, f"Create file failed: {e}")
+                    return False
+                return True
+
+            try:
+                state["file"] = open(dest_path, "wb")
+            except Exception as e:
+                self._mark_stream_error(stream_id, state, f"Open file failed: {e}")
+                return False
+
+            return True
+
+        def _write_stream_bytes(self, stream_id, state: dict, data: bytes) -> None:
+            if not data or state.get("discard"):
+                return
+
+            expected = state.get("expected")
+            received = state.get("received", 0)
+
+            if expected == 0:
+                self._mark_stream_error(stream_id, state, "Unexpected data for empty file")
+                return
+
+            if expected is not None and received >= expected:
+                self._mark_stream_error(stream_id, state, "Received more data than expected")
+                return
+
+            remaining = expected - received if expected is not None else len(data)
+            chunk = data if expected is None or len(data) <= remaining else data[:remaining]
+
+            if len(data) > remaining:
+                self._mark_stream_error(stream_id, state, "Received more data than expected")
+
+            f = state.get("file")
+            if not f:
+                self._mark_stream_error(stream_id, state, "File handle missing")
+                return
+
+            f.write(chunk)
+            state["received"] = received + len(chunk)
+            self._received_bytes += len(chunk)
+            self._update_progress()
+
+        def _finalize_stream(self, stream_id: int) -> None:
+            state = self._stream_states.pop(stream_id, None)
+            if not state:
+                return
+
+            f = state.get("file")
+            if f:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+
+            expected = state.get("expected")
+            received = state.get("received", 0)
+            had_error = bool(state.get("error"))
+
+            if expected is not None and expected != received and not had_error:
+                self._mark_stream_error(
+                    stream_id,
+                    state,
+                    f"Size mismatch (expected {expected}, got {received})",
+                )
+                had_error = True
+
+            if had_error:
+                dest_path = state.get("dest_path")
+                if dest_path and os.path.exists(dest_path):
+                    try:
+                        os.remove(dest_path)
+                    except Exception:
+                        pass
+
+            self._files_received += 1
+            if not had_error:
+                LOG.info(
+                    f"QUIC received: {state.get('file_name', 'unknown')} "
+                    f"({received} bytes) [{self._files_received}/{self._files_to_receive}]"
+                )
+
+            if self._files_to_receive and self._files_received >= self._files_to_receive:
+                self._finalize_transfer()
+
+        def _update_progress(self):
+            if not self._state or self._total_size <= 0:
+                return
+            now = time.time()
+            if (now - self._last_progress_ts) < 0.1 and self._received_bytes < self._total_size:
+                return
+            self._last_progress_ts = now
+            self._state.update_progress(
+                self._dev_id,
+                min(1.0, self._received_bytes / self._total_size),
+                self._received_bytes,
+            )
+
+        def _finalize_transfer(self):
+            if self._finalized:
+                return
+            self._finalized = True
+            if not self._state:
+                return
+
+            duration = time.time() - self._start_time if self._start_time else 0.0
+            status = TransferStatus.COMPLETED
+            error_msg = None
+
+            if self._error:
+                status = TransferStatus.ERROR
+                error_msg = self._error_msg or "QUIC transfer failed"
+                self._state.set_transfer_status(self._dev_id, status)
+
+            self._state.update_progress(self._dev_id, 1.0, self._total_size)
+
+            if self._history and self._start_time is not None:
+                _record_receive(
+                    self._history,
+                    self._start_time,
+                    self._peer_name,
+                    self._peer_host,
+                    self._files_to_receive,
+                    self._total_size,
+                    duration,
+                    status,
+                    error_msg=error_msg,
+                )
+
+            self._state.schedule_clear_progress(self._dev_id, 2.0)
+
+        def _mark_stream_error(self, stream_id: int, state: dict, message: str) -> None:
+            if not state.get("error"):
+                state["error"] = message
+            if not self._error:
+                self._error = True
+                self._error_msg = message
+            state["discard"] = True
+            LOG.error(f"QUIC stream {stream_id}: {message}")
     
     
     class FIshareQUICClientProtocol(QuicConnectionProtocol):
         """QUIC client protocol for sending files."""
         
-        def __init__(self, *args, identity=None, device_name=None, **kwargs):
+        def __init__(self, *args, identity=None, device_name=None, listen_port=None, **kwargs):
             super().__init__(*args, **kwargs)
             self._identity = identity
             self._device_name = device_name
+            self._listen_port = listen_port
             self._response_received = asyncio.Event()
             self._accepted = False
         
@@ -958,6 +1184,7 @@ if QUIC_AVAILABLE:
                 "files": files_rel,
                 "total": total_size,
                 "peer_name": self._device_name,
+                "listen_port": self._listen_port,
                 "identity_key": identity_key_b64,
                 "identity_sig": identity_sig_b64,
             }
@@ -1001,6 +1228,7 @@ if QUIC_AVAILABLE:
             
             # Stream file in chunks — never load the whole file into memory.
             sent = 0
+            pending_chunks = 0
             with open(file_path, "rb") as f:
                 while True:
                     chunk = f.read(QUICProtocol.CHUNK_SIZE)
@@ -1009,9 +1237,13 @@ if QUIC_AVAILABLE:
                     sent += len(chunk)
                     end = sent >= fsize
                     self._quic.send_stream_data(stream_id, chunk, end_stream=end)
-                    self.transmit()
+                    pending_chunks += 1
+                    if end or pending_chunks >= 4:
+                        self.transmit()
+                        pending_chunks = 0
                     if progress_callback:
                         progress_callback(offset + sent, total_size)
-                    await asyncio.sleep(0)  # yield to event loop
+                    if end or pending_chunks == 0:
+                        await asyncio.sleep(0)  # yield to event loop
             
             LOG.info(f"QUIC sent: {fname} ({fsize} bytes)")

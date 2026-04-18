@@ -13,7 +13,7 @@ FIshare is a high-performance, encrypted file transfer application for local net
 - **Multi-protocol support:** TCP (always available) and QUIC (optional, requires cert files)
 - **Automatic protocol selection:** Best common protocol negotiated per peer
 - **Binary wire protocol:** Raw encrypted frames — no JSON serialisation overhead on data
-- **Read-ahead I/O:** Background reader thread overlaps disk reads with network sends for files ≥ 2 MB
+- **Streaming file I/O:** Chunked reads/writes with adaptive sizing in the native engine
 - **Zero-copy receive:** `recv_into` + `memoryview` — no internal buffer copies
 - **8 MB socket buffers + TCP_NODELAY:** Eliminates RTT stalls and Nagle delays
 
@@ -52,6 +52,7 @@ FIshare is a high-performance, encrypted file transfer application for local net
 ```bash
 cd Fishare
 pip install -r requirements.txt
+python build_cpp.py
 python app.py
 ```
 
@@ -121,7 +122,7 @@ security.py         — AEADStream (ChaCha20-Poly1305), key_agree() (X25519+Ed25
 history.py          — TransferRecord dataclass + JSON-backed TransferHistory
 history_window.py   — History dialog (PyQt6)
 
-cpp_engine/         — Optional C++ performance module (pybind11)
+cpp_engine/         — Required C++ performance module (pybind11)
   ├─ engine.cpp     — High-speed file I/O with AEAD framing (2-3x faster)
   ├─ aead.cpp       — ChaCha20-Poly1305 via OpenSSL EVP interface
   └─ bindings.cpp   — Python bindings (send_file, recv_file with GIL release)
@@ -147,8 +148,7 @@ Worker thread (_run_queue_worker):
       ├─ Send request JSON → wait for Accept
       ├─ For each file:
       │    send header JSON
-      │    if file ≥ 2 MB: read-ahead thread + encrypt+send main thread
-      │    else: direct read+encrypt+send
+      │    stream file via C++ engine with adaptive chunk sizing
       └─ Record to history
 ```
 
@@ -186,7 +186,7 @@ Handshake sequence:
 
 ### State Management
 
-`AppState` uses a single `RLock` and one `Dict[str, _TransferInfo]` for all transfer tracking. Presence in the dict means the transfer is active (replaces the previous five parallel dicts + a set). The UI polls a snapshot every 500 ms — no direct access to live state from the GUI thread.
+`AppState` uses a single `RLock` and one `Dict[str, _TransferInfo]` for all transfer tracking. Presence in the dict means the transfer is active (replaces the previous five parallel dicts + a set). The UI polls snapshots on a 500 ms timer but only rebuilds lists when the state version changes.
 
 ---
 
@@ -199,11 +199,10 @@ Handshake sequence:
 | WiFi 2.4 GHz | 15–35 MB/s | QUIC helps with packet loss |
 
 **Key optimisations:**
-- 1 MB chunks: fewer syscalls than 64 KB, no memory pressure vs 4 MB
+- Adaptive chunk sizing (1–16 MB) to balance syscalls and memory use
 - 8 MB kernel socket buffers: fills Gigabit pipe without stalls
 - Single `sendall(header + payload)`: avoids extra TCP segment from two-call approach
 - `recv_into + memoryview`: zero-copy receive, no intermediate `bytearray` copies
-- Read-ahead thread (files ≥ 2 MB): disk I/O and network I/O run in parallel
 - Speed timer reset on first byte: displayed MB/s reflects actual network throughput
 
 ---
@@ -306,9 +305,9 @@ aioquic >= 0.9.20       # QUIC protocol (also requires TLS cert files)
 
 ---
 
-## ?? Available Performance Boost
+## ?? C++ Engine (Required)
 
-**C++ engine (optional):**
+Build the native transfer engine once:
 ```bash
 python build_cpp.py
 ```
@@ -316,7 +315,6 @@ Provides 2-3x faster transfers via:
 - GIL-free file I/O with OpenSSL AEAD
 - Zero-copy buffer handling
 - Optimized frame encoding/decoding
-- Automatic fallback to Python if build unavailable
 
 ## ?? Planned Enhancements
 

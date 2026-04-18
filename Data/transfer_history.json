@@ -1,5 +1,16 @@
 [
   {
+    "timestamp": 1773077264.1745138,
+    "direction": "received",
+    "peer_name": "DESKTOP-CU2U3RT",
+    "peer_host": "192.168.1.131",
+    "num_files": 3,
+    "total_size": 160713547,
+    "duration": 2.3748767375946045,
+    "status": "completed",
+    "error_msg": null
+  },
+  {
     "timestamp": 1773074432.8548634,
     "direction": "sent",
     "peer_name": "DESKTOP-CU2U3RT",

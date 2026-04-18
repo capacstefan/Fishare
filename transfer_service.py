@@ -87,10 +87,7 @@ class TransferService:
         
         # Remove failed protocols
         for proto in failed:
-            try:
-                self.protocol_selector._protocols.remove(proto)
-            except ValueError:
-                pass
+            self.protocol_selector.remove_protocol(proto)
     
     def stop(self):
         """Stop all protocol servers."""

@@ -186,3 +186,10 @@ class ProtocolSelector:
             if proto.capabilities.name == proto_type:
                 return proto
         return None
+
+    def remove_protocol(self, protocol: TransferProtocol) -> None:
+        """Remove a protocol from the available set (best-effort)."""
+        try:
+            self._protocols.remove(protocol)
+        except ValueError:
+            pass

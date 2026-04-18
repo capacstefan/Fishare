@@ -242,6 +242,8 @@ class FIshareQtApp(QMainWindow):
         # UI-local selection state (not shared with AppState)
         self._selected_files: Dict[str, int] = {}   # path → cached file size
         self._selected_device_ids: List[str] = []
+        self._last_devices_version = -1
+        self._last_transfers_version = -1
 
         if transfer is not None:
             # TransferService was already created (and servers started) in app.py.
@@ -627,15 +629,30 @@ class FIshareQtApp(QMainWindow):
 
     @pyqtSlot()
     def _refresh_ui(self):
-        self._refresh_lists()
-        devices_snap = self.state.snapshot_devices()
-        progress_snap = self.state.snapshot_progress()
-        self.progress_panel.refresh(progress_snap, devices_snap)
+        devices_version = self.state.get_devices_version()
+        transfers_version = self.state.get_transfers_version()
+        devices_changed = devices_version != self._last_devices_version
+        transfers_changed = transfers_version != self._last_transfers_version
 
-    def _refresh_lists(self):
+        devices_snap = None
+        progress_snap = None
+        if devices_changed or transfers_changed:
+            devices_snap = self.state.snapshot_devices()
+            progress_snap = self.state.snapshot_progress()
+
+        if devices_changed:
+            self._last_devices_version = devices_version
+            self._refresh_lists(devices_snap)
+
+        if transfers_changed or devices_changed:
+            self._last_transfers_version = transfers_version
+            self.progress_panel.refresh(progress_snap, devices_snap)
+
+    def _refresh_lists(self, devices_snap=None):
         # Devices
         self.device_list.clear()
-        devices_snap = self.state.snapshot_devices()
+        if devices_snap is None:
+            devices_snap = self.state.snapshot_devices()
         for dev_id, dev in devices_snap.items():
             dot = "🟢" if dev.status == AppStatus.AVAILABLE else "🔴"
             item = QListWidgetItem(f"{dot}   {dev.name}   ({dev.host})")
