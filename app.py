@@ -1,5 +1,6 @@
 """FIshare — local network file sharing application."""
 
+import logging
 import sys
 
 from PyQt6.QtWidgets import QApplication
@@ -15,6 +16,7 @@ from state import AppState
 
 def main():
     setup_logging()
+    log = logging.getLogger(__name__)
     cfg = Config.load()
     state = AppState(cfg)
     history = TransferHistory()
@@ -37,6 +39,10 @@ def main():
     ret = 0
     try:
         ret = app.exec()
+    except KeyboardInterrupt:
+        # Allow Ctrl+C from terminal to stop the GUI without a traceback dump.
+        log.info("KeyboardInterrupt received, shutting down")
+        ret = 0
     finally:
         transfer.stop()
         advertiser.stop()

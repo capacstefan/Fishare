@@ -565,6 +565,7 @@ class QUICProtocol(BaseTransferProtocol):
         self._capabilities = QUIC_CAPABILITIES
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._server_task: Optional[asyncio.Task] = None
+        self._server_thread: Optional[threading.Thread] = None
         self._shutdown = False
     
     def is_available(self) -> bool:
@@ -596,13 +597,23 @@ class QUICProtocol(BaseTransferProtocol):
             
             def run_server():
                 asyncio.set_event_loop(self._loop)
-                self._loop.run_until_complete(
-                    self._start_quic_server(_ready, _ok)
-                )
+                try:
+                    self._loop.run_until_complete(
+                        self._start_quic_server(_ready, _ok)
+                    )
+                except Exception as e:
+                    LOG.error(f"QUIC server thread crashed: {e}", exc_info=True)
+                finally:
+                    try:
+                        self._loop.close()
+                    except Exception:
+                        pass
+                    self._loop = None
             
             server_thread = threading.Thread(
                 target=run_server, daemon=True, name="quic-server"
             )
+            self._server_thread = server_thread
             server_thread.start()
             
             _ready.wait(timeout=3.0)
@@ -677,9 +688,13 @@ class QUICProtocol(BaseTransferProtocol):
         self._shutdown = True
         if self._loop:
             try:
-                self._loop.call_soon_threadsafe(self._loop.stop)
+                # Wake the loop so _start_quic_server observes _shutdown promptly.
+                self._loop.call_soon_threadsafe(lambda: None)
             except Exception:
                 pass
+        if self._server_thread and self._server_thread.is_alive():
+            self._server_thread.join(timeout=2.0)
+        self._server_thread = None
     
     # ── Client (sender) ─────────────────────────────────
     
