@@ -15,19 +15,16 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..util import fmt_size
+
 
 COLUMNS = ["Date", "Size", "# Files", "Direction", "Peer", "Type"]
 
 
 def _fmt_size(n) -> str:
-    if n in ("-", None, 0):
-        return "-" if n != 0 else "0 B"
-    n = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
-        n /= 1024
-    return f"{n:.1f} TB"
+    if n in ("-", None):
+        return "-"
+    return fmt_size(n)
 
 
 class HistoryTab(QWidget):
@@ -71,11 +68,12 @@ class HistoryTab(QWidget):
 
     def load(self, entries: list[dict]) -> None:
         self.table.setRowCount(0)
-        for e in entries:
-            self.append(e, save=False)
+        # Newest first: storage appends chronologically, so reverse for display.
+        for e in reversed(entries):
+            self.append(e, save=False, at_top=False)
 
-    def append(self, entry: dict, save: bool = True) -> None:
-        row = self.table.rowCount()
+    def append(self, entry: dict, save: bool = True, at_top: bool = True) -> None:
+        row = 0 if at_top else self.table.rowCount()
         self.table.insertRow(row)
         is_text = entry.get("type") == "QuickText"
         cells = [

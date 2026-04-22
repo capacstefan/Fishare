@@ -5,7 +5,6 @@ import random
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -15,7 +14,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMenu,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -25,14 +23,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .theme import ToggleSwitch
-
-
-def _fmt_size(n: float) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
-        n /= 1024
-    return f"{n:.1f} TB"
+from ..util import fmt_size as _fmt_size
 
 
 def _fmt_speed(bps: float) -> str:
@@ -310,15 +301,14 @@ class TransferTab(QWidget):
         self.selected_list.takeItem(self.selected_list.row(item))
 
     def _on_discovered_menu(self, pos) -> None:
+        # Right-click on a discovered peer directly toggles mute (no menu).
+        # Emit the stable peer_id (cert fingerprint) so mute survives renames.
         item = self.discovered_list.itemAt(pos)
         if item is None:
             return
-        name = item.data(Qt.ItemDataRole.UserRole + 1) or item.text()
-        menu = QMenu(self)
-        act = QAction("Toggle Mute", self)
-        act.triggered.connect(lambda: self.mute_toggled.emit(name))
-        menu.addAction(act)
-        menu.exec(self.discovered_list.mapToGlobal(pos))
+        pid = item.data(Qt.ItemDataRole.UserRole)
+        if pid:
+            self.mute_toggled.emit(pid)
 
     def _add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Select files")

@@ -9,14 +9,27 @@ PeerRegistry emits Qt signals so the GUI updates live.
 """
 from __future__ import annotations
 
+import hashlib
 import socket
-import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
-from . import config
+from . import config, crypto_utils
+
+
+def _compute_peer_id() -> str:
+    """Stable identity = SHA-256 prefix of our self-signed TLS cert.
+
+    The cert is generated once by crypto_utils and persists in %APPDATA%,
+    so this id survives device renames and IP changes. An attacker cannot
+    forge it without access to our private key.
+    """
+    cert_path, _ = crypto_utils.ensure_cert()
+    der = Path(cert_path).read_bytes()
+    return hashlib.sha256(der).hexdigest()[:16]
 
 
 @dataclass
@@ -56,10 +69,10 @@ class PeerRegistry(QObject):
 
     def __init__(self, device_name: str, online: bool) -> None:
         super().__init__()
-        self.peer_id = uuid.uuid4().hex[:12]
+        self.peer_id = _compute_peer_id()
         self.device_name = device_name
         self.online = online
-        self._muted: set[str] = set()
+        self._muted: set[str] = set()  # stores peer_ids (fingerprints), not names
         self.peers: dict[str, Peer] = {}  # peer_id -> Peer
 
         self._zc: Zeroconf | None = None
@@ -128,28 +141,29 @@ class PeerRegistry(QObject):
         self.online = online
         self._reregister()
 
-    # ---------- muting ----------
+    # ---------- muting (by peer_id / fingerprint) ----------
     def set_muted(self, muted: set[str]) -> None:
         self._muted = set(muted)
         for p in self.peers.values():
-            new = p.name in self._muted
+            new = p.peer_id in self._muted
             if new != p.muted:
                 p.muted = new
                 self.peer_updated.emit(p)
 
-    def toggle_mute(self, peer_name: str) -> bool:
-        if peer_name in self._muted:
-            self._muted.discard(peer_name)
+    def toggle_mute(self, peer_id: str) -> bool:
+        """Mute/unmute by stable peer_id. Returns new muted state."""
+        if peer_id in self._muted:
+            self._muted.discard(peer_id)
         else:
-            self._muted.add(peer_name)
-        for p in self.peers.values():
-            if p.name == peer_name:
-                p.muted = peer_name in self._muted
-                self.peer_updated.emit(p)
-        return peer_name in self._muted
+            self._muted.add(peer_id)
+        peer = self.peers.get(peer_id)
+        if peer is not None:
+            peer.muted = peer_id in self._muted
+            self.peer_updated.emit(peer)
+        return peer_id in self._muted
 
-    def is_muted(self, peer_name: str) -> bool:
-        return peer_name in self._muted
+    def is_muted(self, peer_id: str) -> bool:
+        return peer_id in self._muted
 
     @property
     def muted(self) -> set[str]:
@@ -186,7 +200,7 @@ class PeerRegistry(QObject):
             address=addr,
             port=port,
             status=status,
-            muted=pname in self._muted,
+            muted=pid in self._muted,
         )
         self.peers[pid] = peer
         if existing is None:

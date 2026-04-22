@@ -15,14 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import config
-
-
-def _fmt_size(n: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
-        n /= 1024
-    return f"{n:.1f} TB"
+from ..util import fmt_size as _fmt_size
 
 
 class AcceptOfferDialog(QDialog):

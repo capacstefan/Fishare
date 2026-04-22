@@ -1,54 +1,24 @@
-"""One-way folder sync (sender -> receiver) using watchdog.
+﻿"""One-way folder sync (sender -> receiver) using watchdog.
 
-On start, sender performs initial scan and transmits every file. Then watchdog
-streams events. Receiver mirrors add/modify/delete. Either side sends "stop".
+On start, sender scans the folder and transmits every file. Then watchdog streams
+events. Receiver mirrors add/modify/delete. Either side can send "stop".
 Messages reuse the same TLS socket created by network.py after accept.
 """
 from __future__ import annotations
 
-import json
-import os
 import ssl
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+from watchdog.observers.api import BaseObserver
 
 from . import config
-
-
-def _send_json(sock: ssl.SSLSocket, obj: dict) -> None:
-    sock.sendall((json.dumps(obj) + "\n").encode("utf-8"))
-
-
-def _recv_line(sock: ssl.SSLSocket) -> str:
-    buf = bytearray()
-    while True:
-        ch = sock.recv(1)
-        if not ch:
-            raise ConnectionError("closed")
-        if ch == b"\n":
-            break
-        buf += ch
-    return buf.decode("utf-8")
-
-
-def _recv_json(sock: ssl.SSLSocket) -> dict:
-    return json.loads(_recv_line(sock))
-
-
-def _recv_exact(sock: ssl.SSLSocket, n: int) -> bytes:
-    out = bytearray()
-    while len(out) < n:
-        chunk = sock.recv(min(config.CHUNK_LARGE, n - len(out)))
-        if not chunk:
-            raise ConnectionError("closed")
-        out += chunk
-    return bytes(out)
+from .network import LineReader, _send_json
 
 
 def _rel(root: Path, p: Path) -> str:
@@ -59,27 +29,27 @@ def _rel(root: Path, p: Path) -> str:
 # Sender side
 # =============================================================================
 class _SyncEventHandler(FileSystemEventHandler):
-    def __init__(self, on_event: Callable[[str, str, str], None]) -> None:
+    def __init__(self, on_event: Callable[[str, str], None]) -> None:
         super().__init__()
-        self._on = on_event  # (op, src_path, dest_path_or_empty)
+        self._on = on_event  # (op, src_path)
 
     def on_created(self, event):
         if not event.is_directory:
-            self._on("put", event.src_path, "")
+            self._on("put", event.src_path)
 
     def on_modified(self, event):
         if not event.is_directory:
-            self._on("put", event.src_path, "")
+            self._on("put", event.src_path)
 
     def on_deleted(self, event):
         if not event.is_directory:
-            self._on("delete", event.src_path, "")
+            self._on("delete", event.src_path)
 
     def on_moved(self, event):
         if event.is_directory:
             return
-        self._on("delete", event.src_path, "")
-        self._on("put", event.dest_path, "")
+        self._on("delete", event.src_path)
+        self._on("put", event.dest_path)
 
 
 class SyncSender(QObject):
@@ -90,7 +60,7 @@ class SyncSender(QObject):
         super().__init__()
         self._sock = sock
         self._folder = Path(folder)
-        self._observer: Observer | None = None
+        self._observer: Optional[BaseObserver] = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -121,13 +91,14 @@ class SyncSender(QObject):
             pass
 
     def _run(self) -> None:
+        reader = LineReader(self._sock)
         try:
             # 1) Initial scan: send every current file
             for p in self._folder.rglob("*"):
-                if p.is_file():
-                    self._send_put(p)
                 if self._stop.is_set():
                     return
+                if p.is_file():
+                    self._send_put(p)
 
             # 2) Start watchdog
             handler = _SyncEventHandler(self._queue_event)
@@ -140,7 +111,7 @@ class SyncSender(QObject):
             self._sock.settimeout(1.0)
             while not self._stop.is_set():
                 try:
-                    msg = _recv_json(self._sock)
+                    msg = reader.read_json()
                     if msg.get("op") == "stop":
                         self.finished.emit("peer stopped")
                         self.stop(notify=False)
@@ -155,7 +126,7 @@ class SyncSender(QObject):
             self.stop(notify=False)
             self.finished.emit("stopped")
 
-    def _queue_event(self, op: str, src: str, _dest: str) -> None:
+    def _queue_event(self, op: str, src: str) -> None:
         try:
             p = Path(src)
             if op == "put":
@@ -179,12 +150,15 @@ class SyncSender(QObject):
             size = p.stat().st_size
         except Exception:
             return
+        if size > config.MAX_FILE_SIZE:
+            self.event.emit(f"skip {rel}: too large")
+            return
         with self._lock:
             _send_json(self._sock, {"type": "sync_event", "op": "put", "path": rel, "size": size})
-            with p.open("rb") as f:
+            with p.open("rb", buffering=1 << 20) as f:
                 remaining = size
                 while remaining > 0:
-                    chunk = f.read(min(config.CHUNK_LARGE, remaining))
+                    chunk = f.read(min(config.CHUNK, remaining))
                     if not chunk:
                         break
                     self._sock.sendall(chunk)
@@ -225,7 +199,7 @@ class SyncReceiver(QObject):
             pass
 
     def _safe_target(self, rel: str) -> Path | None:
-        # Prevent path traversal
+        """Resolve `rel` under `_dest`; reject path traversal."""
         rel = rel.replace("\\", "/").lstrip("/")
         target = (self._dest / rel).resolve()
         try:
@@ -236,10 +210,11 @@ class SyncReceiver(QObject):
 
     def _run(self) -> None:
         self.event.emit("syncing")
+        reader = LineReader(self._sock)
         try:
             self._sock.settimeout(None)
             while not self._stop.is_set():
-                msg = _recv_json(self._sock)
+                msg = reader.read_json()
                 if msg.get("type") != "sync_event":
                     continue
                 op = msg.get("op")
@@ -247,17 +222,20 @@ class SyncReceiver(QObject):
                     self.finished.emit("peer stopped")
                     return
                 if op == "put":
-                    target = self._safe_target(msg.get("path", ""))
                     size = int(msg.get("size", 0))
+                    if size > config.MAX_FILE_SIZE:
+                        # Can't realign the stream past oversized payload — abort.
+                        raise ValueError("file too large")
+                    target = self._safe_target(msg.get("path", ""))
                     if target is None:
-                        # discard the bytes to keep stream aligned
-                        _recv_exact(self._sock, size)
+                        # Drain bytes to keep stream aligned, then skip.
+                        self._drain(reader, size)
                         continue
                     target.parent.mkdir(parents=True, exist_ok=True)
                     remaining = size
-                    with target.open("wb") as f:
+                    with target.open("wb", buffering=1 << 20) as f:
                         while remaining > 0:
-                            chunk = self._sock.recv(min(config.CHUNK_LARGE, remaining))
+                            chunk = reader.recv(min(config.CHUNK, remaining))
                             if not chunk:
                                 raise ConnectionError("closed mid-file")
                             f.write(chunk)
@@ -274,3 +252,12 @@ class SyncReceiver(QObject):
         finally:
             self.stop(notify=False)
             self.finished.emit("stopped")
+
+    @staticmethod
+    def _drain(reader: LineReader, n: int) -> None:
+        remaining = n
+        while remaining > 0:
+            chunk = reader.recv(min(config.CHUNK, remaining))
+            if not chunk:
+                raise ConnectionError("closed mid-drain")
+            remaining -= len(chunk)

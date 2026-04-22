@@ -75,7 +75,11 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.settings = storage.load_settings()
-        self._muted: set[str] = storage.load_muted()
+        # Mute is keyed on peer_id (cert fingerprint). Drop any legacy name-based
+        # entries from older versions so they don't silently linger.
+        self._muted: set[str] = {m for m in storage.load_muted() if len(m) == 16 and all(c in "0123456789abcdef" for c in m)}
+        if self._muted != storage.load_muted():
+            storage.save_muted(self._muted)
 
         self.setWindowTitle(config.APP_NAME)
         self.resize(1200, 780)
@@ -136,6 +140,7 @@ class MainWindow(QMainWindow):
         self.tab_transfer.mute_toggled.connect(self._on_toggle_mute)
 
         self.tab_text.send_text_requested.connect(self._on_send_text)
+        self.tab_text.mute_toggled.connect(self._on_toggle_mute)
 
         self.tab_tools.sync_start_requested.connect(self._on_sync_start)
         self.tab_tools.sync_stop_requested.connect(self._on_sync_stop)
@@ -147,6 +152,7 @@ class MainWindow(QMainWindow):
         self.server.transfer_completed.connect(self._on_recv_completed)
         self.server.text_received.connect(self._on_text_received)
         self.server.sync_started.connect(self._on_incoming_sync)
+        self.server.impersonation_detected.connect(self._on_impersonation_detected)
         self.server.log.connect(lambda m: self.statusBar().showMessage(m, 4000))
 
     def _refresh_status(self) -> None:
@@ -157,10 +163,13 @@ class MainWindow(QMainWindow):
         )
 
     def _get_server_state(self) -> dict:
+        # known_ids_by_name lets the server detect impersonation (same display
+        # name, different stable fingerprint). Mute is keyed on peer_id.
         return {
             "online": bool(self.settings["online"]),
             "muted": set(self._muted),
             "download_dir": self.settings["download_dir"],
+            "known_ids_by_name": {p.name: p.peer_id for p in self.registry.peers.values()},
         }
 
     def notify(self, text: str) -> None:
@@ -211,11 +220,20 @@ class MainWindow(QMainWindow):
             storage.save_settings(self.settings)
             self._refresh_status()
 
-    def _on_toggle_mute(self, peer_name: str) -> None:
-        now_muted = self.registry.toggle_mute(peer_name)
+    def _on_toggle_mute(self, peer_id: str) -> None:
+        # peer_id = stable cert-fingerprint identity (survives rename).
+        peer = self.registry.peers.get(peer_id)
+        display = peer.name if peer else peer_id
+        now_muted = self.registry.toggle_mute(peer_id)
         self._muted = self.registry.muted
         storage.save_muted(self._muted)
-        self.notify(f"{'Muted' if now_muted else 'Unmuted'} {peer_name}")
+        self.notify(f"{'Muted' if now_muted else 'Unmuted'} {display}")
+
+    @pyqtSlot(str)
+    def _on_impersonation_detected(self, claimed_name: str) -> None:
+        # Another peer tried to use a name we already know under a different
+        # fingerprint. Warn the user — the real peer is unaffected.
+        self.notify(f"⚠ Impersonation attempt: “{claimed_name}” (different fingerprint)")
 
     def _submit_task(self, task: TransferTask) -> None:
         self._live_tasks.append(task)
@@ -309,7 +327,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(object)
     def _on_offer_received(self, offer) -> None:
-        if not self.settings["online"] or offer.sender_name in self._muted:
+        if not self.settings["online"] or offer.sender_id in self._muted:
             offer.respond(False)
             return
         dlg = AcceptOfferDialog(offer, self)
@@ -370,10 +388,11 @@ class MainWindow(QMainWindow):
             return
 
         import socket as _socket
-        from ..network import _client_ctx, _send_json, _recv_json  # type: ignore
+        from ..network import _client_ctx, _send_json, _tune_sock, LineReader  # type: ignore
 
         try:
             raw = _socket.create_connection((peer.address, peer.port), timeout=10)
+            _tune_sock(raw)
             sock = _client_ctx().wrap_socket(raw, server_hostname=peer.address)
             _send_json(sock, {
                 "type": "offer", "kind": "sync",
@@ -382,7 +401,7 @@ class MainWindow(QMainWindow):
                 "folder": Path(folder).name,
             })
             sock.settimeout(180)
-            resp = _recv_json(sock)
+            resp = LineReader(sock).read_json()
             if not resp.get("accept"):
                 QMessageBox.information(
                     self, "Sync", f"Peer rejected sync: {resp.get('reason', '')}"

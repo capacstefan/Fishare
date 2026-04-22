@@ -1,9 +1,9 @@
 """Generate a self-signed TLS certificate on first run. Stored in %APPDATA%."""
 from __future__ import annotations
 
-import datetime as _dt
 import ipaddress
 import socket
+from datetime import datetime, timedelta, timezone
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -31,17 +31,17 @@ def ensure_cert() -> tuple[str, str]:
     except Exception:
         pass
 
-    now = _dt.datetime.utcnow()
+    now = datetime.now(timezone.utc)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(issuer)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now - _dt.timedelta(days=1))
-        .not_valid_after(now + _dt.timedelta(days=3650))
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=3650))
         .add_extension(x509.SubjectAlternativeName(san), critical=False)
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .sign(key, hashes.SHA256())
     )
 

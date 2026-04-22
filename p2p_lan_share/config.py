@@ -12,13 +12,11 @@ APP_ID = "p2p_lan_share"
 SERVICE_TYPE = "_p2planshare._tcp.local."
 TCP_PORT = 51821               # TLS transfer port
 WEB_PORT = 51822               # QR web server port
-MAX_CONCURRENT_TRANSFERS = 4
+MAX_CONCURRENT_TRANSFERS = 3
 SOCKET_TIMEOUT = 30            # seconds for control messages
 
 # Transfer tuning
-CHUNK_SMALL = 16 * 1024        # 16 KB for tiny files
-CHUNK_LARGE = 1 * 1024 * 1024  # 1 MB for big files
-LARGE_FILE_THRESHOLD = 512 * 1024  # >512 KB -> large chunk
+CHUNK = 1 * 1024 * 1024        # 1 MB read/send chunk (single size — KISS)
 
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 QUICK_TEXT_MAX_CHARS = 500

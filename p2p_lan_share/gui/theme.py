@@ -200,16 +200,32 @@ QListWidget, QTableWidget {{
     font-size: 11pt;
     outline: 0;
 }}
-QListWidget::item, QTableWidget::item {{
+QListWidget::item {{
     padding: 8px 10px;
     border-radius: 8px;
 }}
-QListWidget::item:selected, QTableWidget::item:selected {{
+QListWidget::item:selected {{
     background: rgba(10, 132, 255, 0.12);
     color: {TEXT};
 }}
 QListWidget::item:hover {{
     background: rgba(0, 0, 0, 0.03);
+}}
+/* Tables: render as flat rows (no per-cell rounded tile). */
+QTableWidget {{
+    gridline-color: transparent;
+    selection-background-color: rgba(10, 132, 255, 0.10);
+    selection-color: {TEXT};
+    alternate-background-color: #fafbfc;
+}}
+QTableWidget::item {{
+    padding: 8px 10px;
+    border: none;
+    background: transparent;
+}}
+QTableWidget::item:selected {{
+    background: rgba(10, 132, 255, 0.10);
+    color: {TEXT};
 }}
 QHeaderView::section {{
     background: {SURFACE};
@@ -219,9 +235,6 @@ QHeaderView::section {{
     font-weight: 600;
     color: {MUTED};
     font-size: 10pt;
-}}
-QTableWidget {{
-    gridline-color: transparent;
 }}
 
 /* -------- CheckBox (for PIN Lock) -------- */

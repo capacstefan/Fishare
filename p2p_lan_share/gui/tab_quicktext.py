@@ -31,6 +31,7 @@ def _muted(text: str) -> QLabel:
 
 class QuickTextTab(QWidget):
     send_text_requested = pyqtSignal(list, str)   # peers, text
+    mute_toggled = pyqtSignal(str)                # peer name
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -61,6 +62,8 @@ class QuickTextTab(QWidget):
         self.discovered_list = QListWidget()
         self.discovered_list.setMinimumHeight(220)
         self.discovered_list.itemDoubleClicked.connect(self._on_discover_dclick)
+        self.discovered_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.discovered_list.customContextMenuRequested.connect(self._on_discovered_rightclick)
         left.addWidget(self.discovered_list)
 
         right = QVBoxLayout()
@@ -80,7 +83,7 @@ class QuickTextTab(QWidget):
         cols.addLayout(right, 1)
         pv.addLayout(cols)
 
-        write_btn = QPushButton("✎  Write Quick Text")
+        write_btn = QPushButton("Write Quick Text")
         write_btn.setProperty("role", "primary")
         write_btn.setMinimumHeight(38)
         write_btn.clicked.connect(self._write)
@@ -136,6 +139,16 @@ class QuickTextTab(QWidget):
         it = QListWidgetItem(name)
         it.setData(Qt.ItemDataRole.UserRole, pid)
         self.selected_list.addItem(it)
+
+    def _on_discovered_rightclick(self, pos) -> None:
+        # Right-click on a discovered peer directly toggles mute.
+        # Emit the stable peer_id (cert fingerprint).
+        item = self.discovered_list.itemAt(pos)
+        if item is None:
+            return
+        pid = item.data(Qt.ItemDataRole.UserRole)
+        if pid:
+            self.mute_toggled.emit(pid)
 
     # ---------- send ----------
     def _write(self) -> None:
