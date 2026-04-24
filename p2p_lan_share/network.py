@@ -1,4 +1,4 @@
-﻿"""TLS networking: transfer server, client, queue, JSON-line protocol.
+"""TLS networking: transfer server, client, queue, JSON-line protocol.
 
 Protocol (all control messages are UTF-8 JSON lines ending with '\\n'):
   Sender -> Receiver (offer):

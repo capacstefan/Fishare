@@ -27,7 +27,6 @@ dist/
 # Native build artifacts
 *.obj
 *.o
-*.pyd
 *.so
 *.dll
 *.exp
