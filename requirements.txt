@@ -4,3 +4,4 @@ cryptography>=42.0
 flask>=3.0
 qrcode[pil]>=7.4
 watchdog>=4.0
+pybind11>=2.12

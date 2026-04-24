@@ -106,10 +106,15 @@ static py::int_ send_file(py::object sslsock,
             if (n == 0)
                 break; // EOF.
 
-            // One Python bytes object per chunk, one sendall call.
-            // ssl.sendall() handles partial writes and GIL release internally.
-            py::bytes chunk(buf.data(), static_cast<py::ssize_t>(n));
-            py_sendall(chunk);
+            // Zero-copy: give sendall a memoryview into our own C++ buffer.
+            // py::bytes(ptr, n) would memcpy the entire chunk into a new
+            // Python-owned buffer — that is a full 1 MiB copy that pure Python
+            // never does (file.read() returns a bytes object with no extra copy).
+            // py::memoryview::from_memory() is a pointer-only operation; it lets
+            // ssl.sendall() read directly from buf without any allocation.
+            py::memoryview mv = py::memoryview::from_memory(
+                buf.data(), static_cast<py::ssize_t>(n));
+            py_sendall(mv);
             total_sent += n;
 
             auto now = std::chrono::steady_clock::now();
