@@ -1,0 +1,30 @@
+# Virtual environment
+.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Native build artifacts
+*.pyd
+*.so
+*.dll
+*.obj
+*.o
+*.exp
+*.lib
+*.pdb
+
+# Build and packaging
+build/
+dist/
+*.egg-info/
+*.whl
+
+# IDE
+.vscode/
+.idea/
+
+# Logs / temp
+*.log
+*.tmp
