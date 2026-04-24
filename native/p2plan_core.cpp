@@ -69,12 +69,25 @@ static py::int_ send_file(py::object sslsock,
     if (!fp)
         throw std::runtime_error("cannot open for reading: " + path);
 
+    // Disable the CRT's own tiny stdio buffer. We supply a 1 MiB buffer
+    // ourselves; the CRT layer just adds extra system-call overhead.
+    std::setvbuf(fp, nullptr, _IONBF, 0);
+
     // One heap buffer, reused for the whole file. No per-chunk allocation.
     std::vector<char> buf(CHUNK);
 
-    // Cache the bound method once; repeated attribute lookup is part of the
-    // overhead we moved to C++ to remove.
-    py::object py_send = sslsock.attr("send");
+    // Use sendall() instead of send().
+    //
+    // Rationale: ssl.SSLSocket.sendall() drives its retry loop entirely inside
+    // Python's C extension (libssl), releasing the GIL for the actual
+    // encrypt+write work and handling partial writes without returning to our
+    // C++ loop. Calling send() from C++ instead means:
+    //   * one new py::memoryview object per partial send (heap alloc + refcount),
+    //   * one GIL acquire/release cycle per call to send(),
+    //   * our outer while(off<n) loop running in interpreted C++ bridging code
+    //     rather than in Python's optimised ssl C layer.
+    // Net result: MORE GIL churn, not less — hence the regression.
+    py::object py_sendall = sslsock.attr("sendall");
 
     size_t total_sent = 0;
     auto last_tick = std::chrono::steady_clock::now();
@@ -93,20 +106,11 @@ static py::int_ send_file(py::object sslsock,
             if (n == 0)
                 break; // EOF.
 
-            // SSLSocket.send() may return fewer bytes than requested; loop
-            // until the whole chunk is written.
-            size_t off = 0;
-            while (off < n)
-            {
-                py::memoryview mv = py::memoryview::from_memory(
-                    buf.data() + off,
-                    static_cast<py::ssize_t>(n - off));
-                size_t w = py_send(mv).cast<size_t>();
-                if (w == 0)
-                    throw std::runtime_error("socket closed during send");
-                off += w;
-                total_sent += w;
-            }
+            // One Python bytes object per chunk, one sendall call.
+            // ssl.sendall() handles partial writes and GIL release internally.
+            py::bytes chunk(buf.data(), static_cast<py::ssize_t>(n));
+            py_sendall(chunk);
+            total_sent += n;
 
             auto now = std::chrono::steady_clock::now();
             if (now - last_tick >= PROGRESS_INTERVAL)
@@ -144,6 +148,10 @@ static py::int_ recv_file(py::object reader,
     std::FILE *fp = std::fopen(path.c_str(), "wb");
     if (!fp)
         throw std::runtime_error("cannot open for writing: " + path);
+
+    // Same reasoning as send_file: disable CRT buffering so fwrite goes
+    // straight to the OS page cache without a redundant intermediate copy.
+    std::setvbuf(fp, nullptr, _IONBF, 0);
 
     const size_t total = total_size.cast<size_t>();
     size_t received = 0;

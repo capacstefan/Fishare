@@ -18,6 +18,10 @@ ext_modules = [
         "p2plan_core",
         ["native/p2plan_core.cpp"],
         cxx_std=17,
+        # MSVC defaults to /Od (no optimisation). Explicitly request full
+        # optimisation + whole-program/link-time optimisation.
+        extra_compile_args=["/O2", "/GL"],
+        extra_link_args=["/LTCG"],
     ),
 ]
 
