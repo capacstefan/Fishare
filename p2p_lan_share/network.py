@@ -34,6 +34,8 @@ from typing import Callable
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+import p2plan_core  # native TLS file pump (required; no Python fallback)
+
 from . import config, crypto_utils
 from .util import unique_path
 
@@ -307,6 +309,13 @@ class TransferServer(QObject):
                     pass
 
     def _recv_files(self, reader: LineReader, offer: IncomingOffer, download_dir: str) -> None:
+        """Receive every file in the offer.
+
+        For each file we hand the raw bytes-pump to the native p2plan_core
+        module: it reads from `reader` and writes to disk inside a tight C++
+        loop with the GIL released. Python stays responsible for the
+        bookkeeping (per-task byte totals, progress signal formatting).
+        """
         dest = Path(download_dir)
         dest.mkdir(parents=True, exist_ok=True)
         received_names: list[str] = []
@@ -314,12 +323,22 @@ class TransferServer(QObject):
         # Streaming: no control-message timeout; raw bytes only.
         reader._sock.settimeout(None)
 
-        # Aggregate progress: done/total are *whole-transfer* bytes so the UI
-        # shows one bar per peer regardless of how many files are inside.
+        # Aggregate progress across the whole task (one bar per peer).
         total = sum(int(f.get("size", 0)) for f in offer.files)
-        done = 0
+        bytes_before = 0
         start = time.monotonic()
-        last_emit = start
+
+        def _emit(file_size: int, target_name: str) -> Callable[[int], None]:
+            """Build a progress callback for the native core for one file."""
+            def cb(done_in_file: int) -> None:
+                done = bytes_before + done_in_file
+                elapsed = max(time.monotonic() - start, 1e-6)
+                bps = done / elapsed
+                eta = _human_eta(total - done, bps)
+                self.file_progress.emit(
+                    offer.sender_name, target_name, done, total, bps, eta
+                )
+            return cb
 
         for fmeta in offer.files:
             name = os.path.basename(fmeta.get("name", "file"))
@@ -327,25 +346,10 @@ class TransferServer(QObject):
             target = unique_path(dest / name)
             received_names.append(target.name)
 
-            file_done = 0
-            with target.open("wb", buffering=1 << 20) as f:
-                while file_done < size:
-                    data = reader.recv(min(config.CHUNK, size - file_done))
-                    if not data:
-                        raise ConnectionError("connection lost during file receive")
-                    f.write(data)
-                    file_done += len(data)
-                    done += len(data)
-                    now = time.monotonic()
-                    if now - last_emit >= 0.1 or done == total:
-                        elapsed = max(now - start, 1e-6)
-                        bps = done / elapsed
-                        eta = _human_eta(total - done, bps)
-                        self.file_progress.emit(
-                            offer.sender_name, target.name, done, total, bps, eta
-                        )
-                        last_emit = now
-        self.transfer_completed.emit(offer.sender_name, received_names, done)
+            p2plan_core.recv_file(reader, str(target), size, _emit(size, target.name))
+            bytes_before += size
+
+        self.transfer_completed.emit(offer.sender_name, received_names, bytes_before)
 
 
 # =============================================================================
@@ -455,23 +459,22 @@ class TransferTask(QObject):
 
     def _send_file(self, sock: ssl.SSLSocket, spec: FileSpec,
                    sent_before: int, total: int, start: float) -> None:
-        file_done = 0
-        last_emit = start
-        with open(spec.path, "rb", buffering=1 << 20) as f:
-            while True:
-                buf = f.read(config.CHUNK)
-                if not buf:
-                    break
-                sock.sendall(buf)
-                file_done += len(buf)
-                now = time.monotonic()
-                if now - last_emit >= 0.1 or file_done == spec.size:
-                    done = sent_before + file_done
-                    elapsed = max(now - start, 1e-6)
-                    bps = done / elapsed
-                    eta = _human_eta(total - done, bps)
-                    self.progress.emit(self.peer_name, spec.name, done, total, bps, eta)
-                    last_emit = now
+        """Send one file using the native core.
+
+        The native loop reads from disk and writes to the SSL socket in C++,
+        with the GIL released, so the Qt UI stays smooth even during large
+        transfers. It invokes ``_on_progress`` roughly every 200 ms with the
+        running byte count of this file; we translate that into the
+        aggregate task-level ``progress`` signal.
+        """
+        def _on_progress(done_in_file: int) -> None:
+            done = sent_before + done_in_file
+            elapsed = max(time.monotonic() - start, 1e-6)
+            bps = done / elapsed
+            eta = _human_eta(total - done, bps)
+            self.progress.emit(self.peer_name, spec.name, done, total, bps, eta)
+
+        p2plan_core.send_file(sock, spec.path, _on_progress)
 
 
 class TransferQueue(QObject):

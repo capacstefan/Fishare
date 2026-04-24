@@ -129,33 +129,48 @@ class MainWindow(QMainWindow):
         self.server.start()
 
     def _connect_signals(self) -> None:
-        self.registry.peer_added.connect(self._on_peer_added)
-        self.registry.peer_updated.connect(self._on_peer_updated)
-        self.registry.peer_removed.connect(self._on_peer_removed)
+        """Wire every cross-component signal in one place.
 
-        self.tab_transfer.device_name_changed.connect(self._on_device_name_changed)
-        self.tab_transfer.online_toggled.connect(self._on_online_toggled)
-        self.tab_transfer.choose_download_dir.connect(self._pick_download_dir)
-        self.tab_transfer.send_requested.connect(self._on_send_files)
-        self.tab_transfer.mute_toggled.connect(self._on_toggle_mute)
+        Each row is ``(source, signal_name, slot)``. Adding a new wire is one
+        line; reviewing the whole graph is one scan.
+        """
+        statusbar_log = lambda m: self.statusBar().showMessage(m, 4000)
+        wires = [
+            # Peer discovery -> GUI update.
+            (self.registry, "peer_added",   self._on_peer_added),
+            (self.registry, "peer_updated", self._on_peer_updated),
+            (self.registry, "peer_removed", self._on_peer_removed),
 
-        self.tab_text.send_text_requested.connect(self._on_send_text)
-        self.tab_text.mute_toggled.connect(self._on_toggle_mute)
-        self.tab_text.inbox_changed.connect(storage.save_quicktexts)
+            # Transfer tab -> controller slots.
+            (self.tab_transfer, "device_name_changed", self._on_device_name_changed),
+            (self.tab_transfer, "online_toggled",      self._on_online_toggled),
+            (self.tab_transfer, "choose_download_dir", self._pick_download_dir),
+            (self.tab_transfer, "send_requested",      self._on_send_files),
+            (self.tab_transfer, "mute_toggled",        self._on_toggle_mute),
 
-        self.tab_tools.sync_start_requested.connect(self._on_sync_start)
-        self.tab_tools.sync_stop_requested.connect(self._on_sync_stop)
-        self.tab_tools.qr_start_requested.connect(self._on_qr_start)
-        self.tab_tools.qr_stop_requested.connect(self._on_qr_stop)
+            # Quick Text tab.
+            (self.tab_text, "send_text_requested", self._on_send_text),
+            (self.tab_text, "mute_toggled",        self._on_toggle_mute),
+            (self.tab_text, "inbox_changed",       storage.save_quicktexts),
 
-        self.server.offer_received.connect(self._on_offer_received)
-        self.server.file_progress.connect(self._on_recv_file_progress)
-        self.server.transfer_completed.connect(self._on_recv_completed)
-        self.server.recv_failed.connect(self.tab_transfer.on_recv_failed)
-        self.server.text_received.connect(self._on_text_received)
-        self.server.sync_started.connect(self._on_incoming_sync)
-        self.server.impersonation_detected.connect(self._on_impersonation_detected)
-        self.server.log.connect(lambda m: self.statusBar().showMessage(m, 4000))
+            # Tools tab (sync + QR).
+            (self.tab_tools, "sync_start_requested", self._on_sync_start),
+            (self.tab_tools, "sync_stop_requested",  self._on_sync_stop),
+            (self.tab_tools, "qr_start_requested",   self._on_qr_start),
+            (self.tab_tools, "qr_stop_requested",    self._on_qr_stop),
+
+            # TLS transfer server -> GUI.
+            (self.server, "offer_received",         self._on_offer_received),
+            (self.server, "file_progress",          self._on_recv_file_progress),
+            (self.server, "transfer_completed",     self._on_recv_completed),
+            (self.server, "recv_failed",            self.tab_transfer.on_recv_failed),
+            (self.server, "text_received",          self._on_text_received),
+            (self.server, "sync_started",           self._on_incoming_sync),
+            (self.server, "impersonation_detected", self._on_impersonation_detected),
+            (self.server, "log",                    statusbar_log),
+        ]
+        for source, name, slot in wires:
+            getattr(source, name).connect(slot)
 
     def _refresh_status(self) -> None:
         self.statusBar().showMessage(

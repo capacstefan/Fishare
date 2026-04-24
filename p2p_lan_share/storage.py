@@ -1,14 +1,16 @@
-"""Simple JSON-based persistence for settings, history, quick texts, muted peers."""
+"""Simple JSON-based persistence for settings, history, quick texts, muted peers.
+
+Writes are atomic via tmp-file + os.replace (POSIX and NTFS both guarantee
+atomic rename), and all callers run on the GUI thread, so no extra lock is
+needed.
+"""
 from __future__ import annotations
 
 import json
-import threading
 from pathlib import Path
 from typing import Any
 
 from . import config
-
-_lock = threading.Lock()
 
 
 def _load(path: Path, default: Any) -> Any:
@@ -22,11 +24,10 @@ def _load(path: Path, default: Any) -> Any:
 
 
 def _save(path: Path, data: Any) -> None:
-    with _lock:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        tmp.replace(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    tmp.replace(path)
 
 
 # ---------- Settings ----------

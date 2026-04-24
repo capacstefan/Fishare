@@ -1,6 +1,0 @@
-PyQt6>=6.6
-zeroconf>=0.131
-cryptography>=42.0
-flask>=3.0
-qrcode[pil]>=7.4
-watchdog>=4.0

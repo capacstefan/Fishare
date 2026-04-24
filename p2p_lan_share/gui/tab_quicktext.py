@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .dialogs import QuickTextEditor, QuickTextReader
+from .widgets import PeerListPair
 
 
 def _title(text: str) -> QLabel:
@@ -55,35 +56,11 @@ class QuickTextTab(QWidget):
         pv.setSpacing(12)
         pv.addWidget(_title("Peers"))
 
-        cols = QHBoxLayout()
-        cols.setSpacing(14)
-
-        left = QVBoxLayout()
-        left.setSpacing(8)
-        left.addWidget(_muted("Discovered"))
-        self.discovered_list = QListWidget()
-        self.discovered_list.setMinimumHeight(140)
-        self.discovered_list.itemDoubleClicked.connect(self._on_discover_dclick)
-        self.discovered_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.discovered_list.customContextMenuRequested.connect(self._on_discovered_rightclick)
-        left.addWidget(self.discovered_list)
-
-        right = QVBoxLayout()
-        right.setSpacing(8)
-        right.addWidget(_muted("Selected"))
-        self.selected_list = QListWidget()
-        self.selected_list.setMinimumHeight(140)
-        self.selected_list.itemDoubleClicked.connect(
-            lambda it: self.selected_list.takeItem(self.selected_list.row(it))
-        )
-        right.addWidget(self.selected_list)
-        clr = QPushButton("Clear All")
-        clr.clicked.connect(self.selected_list.clear)
-        right.addWidget(clr)
-
-        cols.addLayout(left, 1)
-        cols.addLayout(right, 1)
-        pv.addLayout(cols)
+        self.peers = PeerListPair(list_min_height=140)
+        self.discovered_list = self.peers.discovered
+        self.selected_list = self.peers.selected
+        self.peers.peer_right_clicked.connect(self.mute_toggled.emit)
+        pv.addWidget(self.peers, 1)
 
         write_btn = QPushButton("Write Quick Text")
         write_btn.setProperty("role", "primary")
@@ -115,49 +92,12 @@ class QuickTextTab(QWidget):
         split.setSizes([620, 380])
         root.addWidget(split, 1)
 
-    # ---------- peer list ----------
+    # ---------- peer list (delegates to PeerListPair) ----------
     def upsert_peer(self, peer) -> None:
-        for i in range(self.discovered_list.count()):
-            it = self.discovered_list.item(i)
-            if it.data(Qt.ItemDataRole.UserRole) == peer.peer_id:
-                it.setText(peer.display)
-                it.setData(Qt.ItemDataRole.UserRole + 1, peer.name)
-                return
-        it = QListWidgetItem(peer.display)
-        it.setData(Qt.ItemDataRole.UserRole, peer.peer_id)
-        it.setData(Qt.ItemDataRole.UserRole + 1, peer.name)
-        self.discovered_list.addItem(it)
+        self.peers.upsert_peer(peer)
 
     def remove_peer(self, peer_id: str) -> None:
-        for i in range(self.discovered_list.count()):
-            if self.discovered_list.item(i).data(Qt.ItemDataRole.UserRole) == peer_id:
-                self.discovered_list.takeItem(i)
-                break
-        for i in range(self.selected_list.count()):
-            if self.selected_list.item(i).data(Qt.ItemDataRole.UserRole) == peer_id:
-                self.selected_list.takeItem(i)
-                break
-
-    def _on_discover_dclick(self, item: QListWidgetItem) -> None:
-        pid = item.data(Qt.ItemDataRole.UserRole)
-        name = item.data(Qt.ItemDataRole.UserRole + 1) or item.text()
-        for i in range(self.selected_list.count()):
-            if self.selected_list.item(i).data(Qt.ItemDataRole.UserRole) == pid:
-                self.selected_list.takeItem(i)
-                return
-        it = QListWidgetItem(name)
-        it.setData(Qt.ItemDataRole.UserRole, pid)
-        self.selected_list.addItem(it)
-
-    def _on_discovered_rightclick(self, pos) -> None:
-        # Right-click on a discovered peer directly toggles mute.
-        # Emit the stable peer_id (cert fingerprint).
-        item = self.discovered_list.itemAt(pos)
-        if item is None:
-            return
-        pid = item.data(Qt.ItemDataRole.UserRole)
-        if pid:
-            self.mute_toggled.emit(pid)
+        self.peers.remove_peer(peer_id)
 
     # ---------- send ----------
     def _write(self) -> None:
