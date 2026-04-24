@@ -1,0 +1,98 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Send to {{name}}</title>
+<style>
+  :root{
+    --bg:#f4f5f7; --surface:#ffffff; --border:#e4e6eb;
+    --text:#1d1d1f; --muted:#6e6e73; --accent:#0a84ff; --accent-hi:#409cff;
+    --ok:#1f8a3b; --err:#c0382b;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);}
+  body{
+    font-family:-apple-system,"Segoe UI Variable","Segoe UI",Roboto,sans-serif;
+    min-height:100vh;
+    display:flex; flex-direction:column; align-items:center;
+    padding:28px 18px 40px;
+  }
+  .wrap{width:100%; max-width:520px; display:flex; flex-direction:column; align-items:stretch;}
+  h1{
+    font-size:26px; font-weight:700; margin:4px 0 20px;
+    text-align:center; letter-spacing:-0.01em;
+  }
+  h1 .sub{display:block; font-size:14px; font-weight:500; color:var(--muted); margin-top:4px;}
+  .card{
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:22px 20px;
+    margin-bottom:16px;
+    box-shadow:0 1px 2px rgba(0,0,0,0.03);
+  }
+  .card h2{
+    font-size:17px; font-weight:600; margin:0 0 14px; text-align:center;
+  }
+  label.file{
+    display:block; text-align:center; cursor:pointer;
+    padding:14px; border:1px dashed var(--border); border-radius:10px;
+    color:var(--muted); font-size:15px; background:#fafbfc;
+    margin-bottom:14px;
+  }
+  label.file:hover{border-color:var(--accent); color:var(--accent);}
+  input[type=file]{display:none;}
+  #file-names{
+    font-size:13px; color:var(--muted); text-align:center;
+    margin:-8px 0 14px; min-height:18px; word-break:break-all;
+  }
+  textarea{
+    width:100%; min-height:130px; resize:vertical;
+    border:1px solid var(--border); border-radius:10px;
+    padding:12px 14px; font-size:15px; font-family:inherit;
+    background:var(--surface); color:var(--text);
+    margin-bottom:14px;
+  }
+  textarea:focus{outline:none; border-color:var(--accent);}
+  button{
+    width:100%;
+    background:var(--accent); color:#fff; border:0;
+    padding:13px 18px; border-radius:10px;
+    font-size:16px; font-weight:600; cursor:pointer;
+    transition:background .15s ease;
+  }
+  button:hover{background:var(--accent-hi);}
+  .msg{
+    text-align:center; font-size:14px; padding:10px 14px;
+    border-radius:10px; margin-bottom:8px;
+  }
+  .ok{background:#e6f7ec; color:var(--ok); border:1px solid #bde5c8;}
+  .err{background:#fdecea; color:var(--err); border:1px solid #f5c6c1;}
+</style></head>
+<body>
+  <div class="wrap">
+    <h1>Send to {{name}}<span class="sub">Uploads arrive in the app's download folder</span></h1>
+    {% if msg %}<div class="msg {{cls}}">{{msg}}</div>{% endif %}
+
+    <div class="card">
+      <h2>Upload files</h2>
+      <form method="POST" action="upload" enctype="multipart/form-data">
+        <label class="file" for="f">Tap to choose files</label>
+        <input id="f" type="file" name="files" multiple required
+               onchange="document.getElementById('file-names').textContent =
+                 Array.from(this.files).map(x=>x.name).join(', ') || '';">
+        <div id="file-names"></div>
+        <button type="submit">Upload</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Send quick text</h2>
+      <form method="POST" action="text">
+        <textarea name="text" maxlength="500" required
+                  placeholder="Type up to 500 characters…"></textarea>
+        <button type="submit">Send text</button>
+      </form>
+    </div>
+  </div>
+</body></html>
