@@ -1,12 +1,9 @@
 """Central theme: global stylesheet + reusable widgets (toggle switch).
 
-The QSS itself lives in ``gui/assets/app.qss`` so you can tweak colors and
-spacing without touching Python. We load it at startup, substitute the
-palette tokens defined below, and apply it to the QApplication.
+Keep it simple: one QSS string applied app-wide. No per-widget styling scattered
+around the code — if you want to tweak colors, do it here.
 """
 from __future__ import annotations
-
-from pathlib import Path
 
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -35,20 +32,300 @@ SUCCESS   = "#30d158"
 WARN      = "#ff9f0a"
 
 
-_QSS_PATH = Path(__file__).with_name("assets") / "app.qss"
+# ---------------------------------------------------------------------------
+# Global stylesheet
+# ---------------------------------------------------------------------------
+STYLESHEET = f"""
+* {{
+    font-family: "Segoe UI Variable", "Segoe UI", "SF Pro Text", sans-serif;
+    color: {TEXT};
+}}
 
+QMainWindow, QDialog {{
+    background: {BG};
+}}
 
-def _load_stylesheet() -> str:
-    """Read app.qss and substitute @TOKEN@ placeholders with palette values."""
-    text = _QSS_PATH.read_text(encoding="utf-8")
-    tokens = {
-        "BG": BG, "SURFACE": SURFACE, "BORDER": BORDER, "TEXT": TEXT,
-        "MUTED": MUTED, "ACCENT": ACCENT, "ACCENT_HI": ACCENT_HI,
-        "DANGER": DANGER, "SUCCESS": SUCCESS, "WARN": WARN,
-    }
-    for name, value in tokens.items():
-        text = text.replace(f"@{name}@", value)
-    return text
+QStatusBar {{
+    background: transparent;
+    color: {MUTED};
+    padding: 4px 10px;
+    font-size: 11pt;
+}}
+
+/* -------- Tabs -------- */
+QTabWidget::pane {{
+    border: none;
+    background: {BG};
+    top: 4px;
+}}
+QTabWidget, QTabBar {{
+    background: {BG};
+}}
+QTabBar::tab {{
+    background: transparent;
+    padding: 10px 22px;
+    margin-right: 4px;
+    font-size: 12pt;
+    color: {MUTED};
+    border: none;
+    border-radius: 8px;
+}}
+QTabBar::tab:selected {{
+    background: {SURFACE};
+    color: {TEXT};
+    font-weight: 600;
+}}
+QTabBar::tab:hover:!selected {{
+    color: {TEXT};
+}}
+
+/* -------- Cards (GroupBox) -------- */
+QGroupBox {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+    margin-top: 18px;
+    padding: 18px;
+    font-size: 12pt;
+    font-weight: 600;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 8px;
+    left: 12px;
+    color: {TEXT};
+}}
+
+/* Generic "card" frame (objectName='card') */
+QFrame#card {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+}}
+
+/* -------- Labels -------- */
+QLabel {{
+    font-size: 11pt;
+    background: transparent;
+}}
+QLabel[role="h1"] {{
+    font-size: 20pt;
+    font-weight: 700;
+    color: {TEXT};
+}}
+QLabel[role="h2"] {{
+    font-size: 13pt;
+    font-weight: 600;
+    color: {TEXT};
+}}
+QLabel[role="muted"] {{
+    color: {MUTED};
+    font-size: 10pt;
+}}
+QLabel[role="pin"] {{
+    font-size: 14pt;
+    font-weight: 700;
+    color: {WARN};
+    letter-spacing: 3px;
+}}
+
+/* -------- Inputs -------- */
+QLineEdit, QPlainTextEdit, QTextEdit {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-size: 11pt;
+    selection-background-color: {ACCENT};
+    selection-color: white;
+}}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {{
+    border: 1px solid {ACCENT};
+}}
+
+/* -------- Buttons -------- */
+QPushButton {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    padding: 9px 18px;
+    font-size: 11pt;
+    font-weight: 500;
+    color: {TEXT};
+}}
+QPushButton:hover {{
+    background: #fafafa;
+    border-color: #d6d8dc;
+}}
+QPushButton:pressed {{
+    background: #eeeef0;
+}}
+QPushButton:disabled {{
+    color: #b5b5bb;
+    background: #fafafa;
+}}
+
+QPushButton[role="primary"] {{
+    background: {ACCENT};
+    color: white;
+    border: 1px solid {ACCENT};
+}}
+QPushButton[role="primary"]:hover {{
+    background: {ACCENT_HI};
+    border-color: {ACCENT_HI};
+}}
+QPushButton[role="primary"]:disabled {{
+    background: #b8d3fb;
+    border-color: #b8d3fb;
+    color: white;
+}}
+
+QPushButton[role="danger"] {{
+    background: {DANGER};
+    color: white;
+    border: 1px solid {DANGER};
+}}
+QPushButton[role="danger"]:hover {{
+    background: #ff5a52;
+    border-color: #ff5a52;
+}}
+
+/* -------- Lists / Tables -------- */
+QListWidget, QTableWidget {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+    padding: 6px;
+    font-size: 11pt;
+    outline: 0;
+}}
+QListWidget::item {{
+    padding: 8px 10px;
+    border-radius: 8px;
+}}
+QListWidget::item:selected {{
+    background: rgba(10, 132, 255, 0.12);
+    color: {TEXT};
+}}
+QListWidget::item:hover {{
+    background: rgba(0, 0, 0, 0.03);
+}}
+/* Tables: render as flat rows (no per-cell rounded tile). */
+QTableWidget {{
+    gridline-color: transparent;
+    selection-background-color: rgba(10, 132, 255, 0.10);
+    selection-color: {TEXT};
+    alternate-background-color: #fafbfc;
+}}
+QTableWidget::item {{
+    padding: 8px 10px;
+    border: none;
+    background: transparent;
+}}
+QTableWidget::item:selected {{
+    background: rgba(10, 132, 255, 0.10);
+    color: {TEXT};
+}}
+QHeaderView::section {{
+    background: {SURFACE};
+    padding: 10px;
+    border: none;
+    border-bottom: 1px solid {BORDER};
+    font-weight: 600;
+    color: {MUTED};
+    font-size: 10pt;
+}}
+
+/* -------- CheckBox (for PIN Lock) -------- */
+QCheckBox {{
+    font-size: 11pt;
+    spacing: 8px;
+}}
+QCheckBox::indicator {{
+    width: 20px; height: 20px;
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    background: {SURFACE};
+}}
+QCheckBox::indicator:checked {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+    image: none;
+}}
+
+/* -------- ProgressBar -------- */
+QProgressBar {{
+    background: #eceef2;
+    border: 1px solid {BORDER};
+    border-radius: 7px;
+    height: 12px;
+    text-align: center;
+    color: transparent;
+}}
+QProgressBar::chunk {{
+    background: {ACCENT};
+    border-radius: 6px;
+}}
+
+/* -------- Containers (no more black/system fallback) -------- */
+QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget {{
+    background: transparent;
+    border: none;
+}}
+QSplitter {{
+    background: transparent;
+}}
+QWidget#tabPage {{
+    background: {BG};
+}}
+
+/* -------- Scrollbars (minimal) -------- */
+QScrollBar:vertical {{
+    background: transparent;
+    width: 10px;
+    margin: 4px;
+}}
+QScrollBar::handle:vertical {{
+    background: #c9ccd1;
+    border-radius: 5px;
+    min-height: 30px;
+}}
+QScrollBar::handle:vertical:hover {{ background: #a7abb3; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 10px;
+    margin: 4px;
+}}
+QScrollBar::handle:horizontal {{
+    background: #c9ccd1;
+    border-radius: 5px;
+    min-width: 30px;
+}}
+QScrollBar::handle:horizontal:hover {{ background: #a7abb3; }}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ height: 0; width: 0; }}
+
+/* -------- Splitter -------- */
+QSplitter::handle {{
+    background: transparent;
+}}
+
+/* -------- Menu (right-click) -------- */
+QMenu {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    padding: 6px;
+}}
+QMenu::item {{
+    padding: 8px 18px;
+    border-radius: 6px;
+}}
+QMenu::item:selected {{
+    background: rgba(10, 132, 255, 0.12);
+}}
+"""
 
 
 def apply_theme(app) -> None:
@@ -56,7 +333,7 @@ def apply_theme(app) -> None:
     font = QFont("Segoe UI Variable", 10)
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(font)
-    app.setStyleSheet(_load_stylesheet())
+    app.setStyleSheet(STYLESHEET)
 
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,6 @@ from PyQt6.QtWidgets import (
 )
 
 from .theme import ToggleSwitch
-from .widgets import PeerListPair
 from ..util import fmt_size as _fmt_size
 
 
@@ -151,12 +150,37 @@ class TransferTab(QWidget):
         pv.setSpacing(12)
         pv.addWidget(_section_title("Peers"))
 
-        self.peers = PeerListPair(list_min_height=110)
-        # Keep local aliases so existing slots keep working unchanged.
-        self.discovered_list = self.peers.discovered
-        self.selected_list = self.peers.selected
-        self.peers.peer_right_clicked.connect(self.mute_toggled.emit)
-        pv.addWidget(self.peers, 1)
+        peer_cols = QHBoxLayout()
+        peer_cols.setSpacing(14)
+
+        left = QVBoxLayout()
+        left.setSpacing(8)
+        disc_lbl = QLabel("Discovered")
+        disc_lbl.setProperty("role", "muted")
+        left.addWidget(disc_lbl)
+        self.discovered_list = QListWidget()
+        self.discovered_list.setMinimumHeight(110)
+        self.discovered_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.discovered_list.customContextMenuRequested.connect(self._on_discovered_menu)
+        self.discovered_list.itemDoubleClicked.connect(self._on_discover_dclick)
+        left.addWidget(self.discovered_list)
+
+        right = QVBoxLayout()
+        right.setSpacing(8)
+        sel_lbl = QLabel("Selected")
+        sel_lbl.setProperty("role", "muted")
+        right.addWidget(sel_lbl)
+        self.selected_list = QListWidget()
+        self.selected_list.setMinimumHeight(110)
+        self.selected_list.itemDoubleClicked.connect(self._on_selected_dclick)
+        right.addWidget(self.selected_list)
+        clear_sel_btn = QPushButton("Clear All")
+        clear_sel_btn.clicked.connect(self.selected_list.clear)
+        right.addWidget(clear_sel_btn)
+
+        peer_cols.addLayout(left, 1)
+        peer_cols.addLayout(right, 1)
+        pv.addLayout(peer_cols)
 
         # --- Files card ---
         files_card = QFrame()
@@ -239,22 +263,69 @@ class TransferTab(QWidget):
         progress_card.setMaximumHeight(150)
         root.addWidget(progress_card)
 
-    # ---------- peer list management (delegates to PeerListPair) ----------
+    # ---------- peer list management ----------
     def upsert_peer(self, peer) -> None:
-        self.peers.upsert_peer(peer)
+        # Update discovered list
+        for i in range(self.discovered_list.count()):
+            it = self.discovered_list.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) == peer.peer_id:
+                it.setText(peer.display)
+                it.setData(Qt.ItemDataRole.UserRole + 1, peer.name)
+                return
+        it = QListWidgetItem(peer.display)
+        it.setData(Qt.ItemDataRole.UserRole, peer.peer_id)
+        it.setData(Qt.ItemDataRole.UserRole + 1, peer.name)
+        self.discovered_list.addItem(it)
 
     def remove_peer(self, peer_id: str) -> None:
-        self.peers.remove_peer(peer_id)
+        for i in range(self.discovered_list.count()):
+            it = self.discovered_list.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) == peer_id:
+                self.discovered_list.takeItem(i)
+                break
+        # also remove from selected if present
+        name_removed = None
+        for i in range(self.selected_list.count()):
+            it = self.selected_list.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) == peer_id:
+                name_removed = it.text()
+                self.selected_list.takeItem(i)
+                break
 
     def remove_offline_selected(self, peer_id: str) -> None:
-        """When a peer goes offline, drop it from Selected only."""
-        lst = self.selected_list
-        for i in range(lst.count()):
-            if lst.item(i).data(Qt.ItemDataRole.UserRole) == peer_id:
-                lst.takeItem(i)
+        """When a peer goes offline, drop it from Selected."""
+        for i in range(self.selected_list.count()):
+            it = self.selected_list.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) == peer_id:
+                self.selected_list.takeItem(i)
                 return
 
     # ---------- events ----------
+    def _on_discover_dclick(self, item: QListWidgetItem) -> None:
+        pid = item.data(Qt.ItemDataRole.UserRole)
+        name = item.data(Qt.ItemDataRole.UserRole + 1) or item.text()
+        # toggle in selected
+        for i in range(self.selected_list.count()):
+            if self.selected_list.item(i).data(Qt.ItemDataRole.UserRole) == pid:
+                self.selected_list.takeItem(i)
+                return
+        it = QListWidgetItem(name)
+        it.setData(Qt.ItemDataRole.UserRole, pid)
+        self.selected_list.addItem(it)
+
+    def _on_selected_dclick(self, item: QListWidgetItem) -> None:
+        self.selected_list.takeItem(self.selected_list.row(item))
+
+    def _on_discovered_menu(self, pos) -> None:
+        # Right-click on a discovered peer directly toggles mute (no menu).
+        # Emit the stable peer_id (cert fingerprint) so mute survives renames.
+        item = self.discovered_list.itemAt(pos)
+        if item is None:
+            return
+        pid = item.data(Qt.ItemDataRole.UserRole)
+        if pid:
+            self.mute_toggled.emit(pid)
+
     def _add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Select files")
         for p in paths:
