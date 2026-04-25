@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import socket
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, pyqtSignal, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal
 from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
 from . import config, crypto_utils
@@ -66,7 +67,6 @@ class PeerRegistry(QObject):
     peer_added = pyqtSignal(object)       # Peer
     peer_removed = pyqtSignal(str)        # peer_id
     peer_updated = pyqtSignal(object)     # Peer
-    _internal_change_signal = pyqtSignal(str, str, str)
 
     def __init__(self, device_name: str, online: bool, muted: set[str] | None = None) -> None:
         super().__init__()
@@ -76,12 +76,10 @@ class PeerRegistry(QObject):
         # Stores peer_ids (cert fingerprints), not names.
         self._muted: set[str] = set(muted or ())
         self.peers: dict[str, Peer] = {}  # peer_id -> Peer
-        self._pending_removals: dict[str, QTimer] = {}
 
         self._zc: Zeroconf | None = None
         self._info: ServiceInfo | None = None
         self._browser: ServiceBrowser | None = None
-        self._internal_change_signal.connect(self._process_change_on_main)
 
     # ---------- lifecycle ----------
     def start(self) -> None:
@@ -93,25 +91,11 @@ class PeerRegistry(QObject):
         if self._zc is None:
             return
         try:
-            if self._browser is not None:
-                self._browser.cancel()
-        except Exception:
-            pass
-        try:
             if self._info is not None:
                 self._zc.unregister_service(self._info)
         except Exception:
             pass
-        
-        # Briefly wait to allow the mDNS "Goodbye" packet to actually transmit 
-        # over the network before we blindly kill the zeroconf sockets.
-        import time
-        time.sleep(0.15)
-        
-        try:
-            self._zc.close()
-        except Exception:
-            pass
+        self._zc.close()
         self._zc = None
 
     # ---------- self advertisement ----------
@@ -134,6 +118,10 @@ class PeerRegistry(QObject):
             port=config.TCP_PORT,
             properties=props,
             server=f"{socket.gethostname()}-{self.peer_id}.local.",
+            # Short TTL so peers drop us within ~a minute if our process
+            # is killed without a clean goodbye.
+            host_ttl=60,
+            other_ttl=60,
         )
 
     def _register(self) -> None:
@@ -141,33 +129,43 @@ class PeerRegistry(QObject):
         self._info = self._build_info()
         self._zc.register_service(self._info, allow_name_change=True)
 
-    def _reannounce(self) -> None:
-        """Update the mDNS record in the background to avoid UI delays."""
+    def _reannounce_async(self) -> None:
+        """Refresh our TXT record in place, on a background thread.
+
+        ``update_service`` mutates the record without a goodbye/hello cycle,
+        so remote browsers see a single ``Updated`` event and refresh the
+        peer entry in place — no flicker. We run it off the GUI thread
+        because the multicast send can block briefly.
+        """
         if self._zc is None:
             return
+        new_info = self._build_info()
+        self._info = new_info
+        zc = self._zc
 
-        def do_update() -> None:
+        def _do() -> None:
             try:
-                if self._info is not None:
-                    self._zc.unregister_service(self._info)
+                zc.update_service(new_info)
             except Exception:
-                pass
-            self._info = self._build_info()
-            try:
-                self._zc.register_service(self._info, allow_name_change=True)
-            except Exception:
-                pass
+                # Fallback: full re-register if update is unsupported.
+                try:
+                    zc.unregister_service(new_info)
+                except Exception:
+                    pass
+                try:
+                    zc.register_service(new_info, allow_name_change=True)
+                except Exception:
+                    pass
 
-        import threading
-        threading.Thread(target=do_update, daemon=True).start()
+        threading.Thread(target=_do, daemon=True).start()
 
     def set_device_name(self, name: str) -> None:
         self.device_name = name or config.default_device_name()
-        self._reannounce()
+        self._reannounce_async()
 
     def set_online(self, online: bool) -> None:
         self.online = online
-        self._reannounce()
+        self._reannounce_async()
 
     # ---------- muting (by peer_id / fingerprint) ----------
     def toggle_mute(self, peer_id: str) -> bool:
@@ -190,48 +188,23 @@ class PeerRegistry(QObject):
         return set(self._muted)
 
     # ---------- browser callback ----------
-    def _execute_removal(self, pid: str) -> None:
-        if pid in self._pending_removals:
-            timer = self._pending_removals.pop(pid)
-            timer.deleteLater()
-        if pid in self.peers:
-            del self.peers[pid]
-            self.peer_removed.emit(pid)
-
     def _on_change(self, zeroconf: Zeroconf, service_type: str, name: str, state_change) -> None:
-        # Passes the event from the background thread to the main thread securely
-        self._internal_change_signal.emit(service_type, name, str(state_change))
-
-    def _process_change_on_main(self, service_type: str, name: str, state_change_str: str) -> None:
-        if "Removed" in state_change_str:
+        from zeroconf import ServiceStateChange
+        if state_change == ServiceStateChange.Removed:
             # find by service name
             pid = self._pid_from_service(name)
             if pid and pid in self.peers:
-                # Delay removal to prevent UI flicker when peers update their settings
-                if pid not in self._pending_removals:
-                    timer = QTimer(self)
-                    timer.setSingleShot(True)
-                    timer.timeout.connect(lambda p=pid: self._execute_removal(p))
-                    timer.start(1200) # Wait 1.2s before actually removing
-                    self._pending_removals[pid] = timer
+                del self.peers[pid]
+                self.peer_removed.emit(pid)
             return
 
-        # For Added/Updated state_change we query the zeroconf cache
-        if self._zc is None:
-            return
-        info = self._zc.get_service_info(service_type, name, timeout=2000)
+        info = zeroconf.get_service_info(service_type, name, timeout=2000)
         if info is None:
             return
         props = info.properties or {}
         pid = (props.get(b"id") or b"").decode("ascii", "ignore")
         if not pid or pid == self.peer_id:
             return  # skip self
-
-        # Cancel any pending removal since the peer is back
-        if pid in self._pending_removals:
-            timer = self._pending_removals.pop(pid)
-            timer.stop()
-            timer.deleteLater()
 
         pname = (props.get(b"name") or b"").decode("utf-8", "ignore") or name
         status = (props.get(b"status") or b"online").decode("ascii", "ignore")

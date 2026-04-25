@@ -148,7 +148,6 @@ class MainWindow(QMainWindow):
         tt.choose_download_dir.connect(self._pick_download_dir)
         tt.send_requested.connect(self._on_send_files)
         tt.mute_toggled.connect(self._on_toggle_mute)
-        tt.cancel_requested.connect(self.cancel_transfer)
 
         txt.send_text_requested.connect(self._on_send_text)
         txt.mute_toggled.connect(self._on_toggle_mute)
@@ -210,14 +209,15 @@ class MainWindow(QMainWindow):
         self.settings["device_name"] = name
         storage.save_settings(self.settings)
         self._refresh_status()
-        QTimer.singleShot(0, lambda: self.registry.set_device_name(name))
+        self.registry.set_device_name(name)
 
     def _on_online_toggled(self, online: bool) -> None:
+        # UI updates instantly; mDNS re-announce runs on a background thread.
         self.settings["online"] = bool(online)
         storage.save_settings(self.settings)
         self._refresh_status()
         self.notify("Online" if online else "Offline")
-        QTimer.singleShot(0, lambda: self.registry.set_online(bool(online)))
+        self.registry.set_online(bool(online))
 
     def _pick_download_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -243,14 +243,6 @@ class MainWindow(QMainWindow):
             lambda *a, t=task: (self._live_tasks.remove(t) if t in self._live_tasks else None)
         )
         self.queue.submit(task)
-
-    def cancel_transfer(self, direction: str, peer_name: str) -> None:
-        if direction == "up":
-            for t in list(self._live_tasks):
-                if t.peer_name == peer_name:
-                    t.cancel()
-        elif direction == "down":
-            self.server.cancel(peer_name)
 
     def _new_task(self, peer, kind: str, **kwargs) -> TransferTask:
         return TransferTask(
@@ -282,10 +274,12 @@ class MainWindow(QMainWindow):
             return
 
         total = sum(s.size for s in specs)
+        offline: list[str] = []
+        sent = 0
         for name in peer_names:
             peer = self.registry.find_by_name(name)
             if peer is None or peer.status != "online":
-                self.notify(f"Cannot send, {name} is offline")
+                offline.append(name)
                 self.tab_transfer.on_task_status(name, "offline")
                 continue
             task = self._new_task(peer, "files", files=specs, pin=pin)
@@ -296,15 +290,25 @@ class MainWindow(QMainWindow):
                     self._on_send_finished(peer_name, ok, reason, "File", tot, cnt)
             )
             self._submit_task(task)
-        self.notify(f"Sending to {len(peer_names)} peer(s)…")
+            sent += 1
+
+        if offline:
+            QMessageBox.warning(
+                self, "Peer offline",
+                "Could not send to: " + ", ".join(offline) +
+                "\n\nThese peers are offline or unreachable.",
+            )
+        if sent:
+            self.notify(f"Sending to {sent} peer(s)…")
 
     # ---------- send text ----------
     def _on_send_text(self, peer_names: list, text: str) -> None:
         sent = 0
+        offline: list[str] = []
         for name in peer_names:
             peer = self.registry.find_by_name(name)
             if peer is None or peer.status != "online":
-                self.notify(f"Cannot send text, {name} is offline")
+                offline.append(name)
                 continue
             task = self._new_task(peer, "text", text=text)
             task.finished.connect(
@@ -313,7 +317,14 @@ class MainWindow(QMainWindow):
             )
             self._submit_task(task)
             sent += 1
-        self.notify(f"Quick text sent to {sent} peer(s)")
+        if offline:
+            QMessageBox.warning(
+                self, "Peer offline",
+                "Could not send to: " + ", ".join(offline) +
+                "\n\nThese peers are offline or unreachable.",
+            )
+        if sent:
+            self.notify(f"Quick text sent to {sent} peer(s)")
 
     def _on_send_finished(self, peer_name, ok, reason, kind, size, count) -> None:
         if ok:
