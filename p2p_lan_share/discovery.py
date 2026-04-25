@@ -93,11 +93,25 @@ class PeerRegistry(QObject):
         if self._zc is None:
             return
         try:
+            if self._browser is not None:
+                self._browser.cancel()
+        except Exception:
+            pass
+        try:
             if self._info is not None:
                 self._zc.unregister_service(self._info)
         except Exception:
             pass
-        self._zc.close()
+        
+        # Briefly wait to allow the mDNS "Goodbye" packet to actually transmit 
+        # over the network before we blindly kill the zeroconf sockets.
+        import time
+        time.sleep(0.15)
+        
+        try:
+            self._zc.close()
+        except Exception:
+            pass
         self._zc = None
 
     # ---------- self advertisement ----------
@@ -178,7 +192,8 @@ class PeerRegistry(QObject):
     # ---------- browser callback ----------
     def _execute_removal(self, pid: str) -> None:
         if pid in self._pending_removals:
-            del self._pending_removals[pid]
+            timer = self._pending_removals.pop(pid)
+            timer.deleteLater()
         if pid in self.peers:
             del self.peers[pid]
             self.peer_removed.emit(pid)
@@ -214,9 +229,9 @@ class PeerRegistry(QObject):
 
         # Cancel any pending removal since the peer is back
         if pid in self._pending_removals:
-            self._pending_removals[pid].stop()
-            self._pending_removals[pid].deleteLater()
-            del self._pending_removals[pid]
+            timer = self._pending_removals.pop(pid)
+            timer.stop()
+            timer.deleteLater()
 
         pname = (props.get(b"name") or b"").decode("utf-8", "ignore") or name
         status = (props.get(b"status") or b"online").decode("ascii", "ignore")
