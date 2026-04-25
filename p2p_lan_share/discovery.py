@@ -131,16 +131,23 @@ class PeerRegistry(QObject):
         """
         if self._zc is None or self._info is None:
             return
-        self._info = self._build_info()
+        old_info = self._info
+        new_info = self._build_info()
+        self._info = new_info
         try:
-            self._zc.update_service(self._info)
+            if new_info.name == old_info.name:
+                self._zc.update_service(new_info)
+            else:
+                # Name changed (device rename) - re-register cleanly.
+                self._zc.unregister_service(old_info)
+                self._zc.register_service(new_info, allow_name_change=True)
         except Exception:
             # Fallback: full re-register if update is unsupported for any reason.
             try:
-                self._zc.unregister_service(self._info)
+                self._zc.unregister_service(old_info)
             except Exception:
                 pass
-            self._zc.register_service(self._info, allow_name_change=True)
+            self._zc.register_service(new_info, allow_name_change=True)
 
     def set_device_name(self, name: str) -> None:
         self.device_name = name or config.default_device_name()
