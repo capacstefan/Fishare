@@ -1,30 +1,40 @@
-# Virtual environment
-.venv/
-
 # Python bytecode
 __pycache__/
+*/__pycache__/
 *.py[cod]
+*$py.class
 
-# Native build artifacts
-*.pyd
-*.so
-*.dll
-*.obj
-*.o
-*.exp
-*.lib
-*.pdb
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
 
-# Build and packaging
+# Packaging / build artifacts
 build/
 dist/
 *.egg-info/
-*.whl
+.eggs/
 
-# IDE
+# Test / coverage caches
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Type checker / linter caches
+.mypy_cache/
+.pytype/
+.ruff_cache/
+
+# Logs
+*.log
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDEs
 .vscode/
 .idea/
-
-# Logs / temp
-*.log
-*.tmp

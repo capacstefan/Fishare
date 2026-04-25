@@ -67,12 +67,13 @@ class PeerRegistry(QObject):
     peer_removed = pyqtSignal(str)        # peer_id
     peer_updated = pyqtSignal(object)     # Peer
 
-    def __init__(self, device_name: str, online: bool) -> None:
+    def __init__(self, device_name: str, online: bool, muted: set[str] | None = None) -> None:
         super().__init__()
         self.peer_id = _compute_peer_id()
         self.device_name = device_name
         self.online = online
-        self._muted: set[str] = set()  # stores peer_ids (fingerprints), not names
+        # Stores peer_ids (cert fingerprints), not names.
+        self._muted: set[str] = set(muted or ())
         self.peers: dict[str, Peer] = {}  # peer_id -> Peer
 
         self._zc: Zeroconf | None = None
@@ -123,49 +124,38 @@ class PeerRegistry(QObject):
         self._info = self._build_info()
         self._zc.register_service(self._info, allow_name_change=True)
 
-    def _update_props(self) -> None:
-        """Refresh TXT record in place (no goodbye/hello cycle).
+    def _reannounce(self) -> None:
+        """Goodbye + hello with the current TXT record.
 
-        Other peers see a property update instead of a remove+add, so a name
-        change or online/offline flip is instant and doesn't cause flicker.
+        We deliberately do a full unregister/re-register instead of
+        ``update_service``: the latter is best-effort (some peers may
+        miss the TXT update if their cache is fresh), while a fresh
+        registration sends a multicast announcement that every remote
+        browser sees as Removed → Added and re-reads. Slight visual
+        flicker on remote peer lists is the only cost.
         """
-        if self._zc is None or self._info is None:
+        if self._zc is None:
             return
-        old_info = self._info
-        new_info = self._build_info()
-        self._info = new_info
         try:
-            if new_info.name == old_info.name:
-                self._zc.update_service(new_info)
-            else:
-                # Name changed (device rename) - re-register cleanly.
-                self._zc.unregister_service(old_info)
-                self._zc.register_service(new_info, allow_name_change=True)
+            if self._info is not None:
+                self._zc.unregister_service(self._info)
         except Exception:
-            # Fallback: full re-register if update is unsupported for any reason.
-            try:
-                self._zc.unregister_service(old_info)
-            except Exception:
-                pass
-            self._zc.register_service(new_info, allow_name_change=True)
+            pass
+        self._info = self._build_info()
+        try:
+            self._zc.register_service(self._info, allow_name_change=True)
+        except Exception:
+            pass
 
     def set_device_name(self, name: str) -> None:
         self.device_name = name or config.default_device_name()
-        self._update_props()
+        self._reannounce()
 
     def set_online(self, online: bool) -> None:
         self.online = online
-        self._update_props()
+        self._reannounce()
 
     # ---------- muting (by peer_id / fingerprint) ----------
-    def set_muted(self, muted: set[str]) -> None:
-        self._muted = set(muted)
-        for p in self.peers.values():
-            new = p.peer_id in self._muted
-            if new != p.muted:
-                p.muted = new
-                self.peer_updated.emit(p)
-
     def toggle_mute(self, peer_id: str) -> bool:
         """Mute/unmute by stable peer_id. Returns new muted state."""
         if peer_id in self._muted:

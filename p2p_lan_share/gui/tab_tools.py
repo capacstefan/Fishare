@@ -9,11 +9,12 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
-    QListWidgetItem,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
+
+from .peer_list import PeerList
 
 
 class ToolsTab(QWidget):
@@ -31,20 +32,16 @@ class ToolsTab(QWidget):
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(16)
 
-        # ------------- Folder sync -------------
+        # ---------- Folder sync ----------
         sync_gb = QGroupBox("One-Way Folder Sync")
         sv = QVBoxLayout(sync_gb)
         sv.setContentsMargins(20, 26, 20, 18)
         sv.setSpacing(12)
 
-        hint = QLabel("Sender → Receiver. Changes mirror automatically.")
-        hint.setProperty("role", "muted")
-        sv.addWidget(hint)
+        sv.addWidget(_muted("Sender → Receiver. Changes mirror automatically."))
+        sv.addWidget(_muted("Pick one peer"))
 
-        pick_lbl = QLabel("Pick one peer")
-        pick_lbl.setProperty("role", "muted")
-        sv.addWidget(pick_lbl)
-        self.peer_list = QListWidget()
+        self.peer_list = PeerList()
         self.peer_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         sv.addWidget(self.peer_list, 1)
 
@@ -76,15 +73,13 @@ class ToolsTab(QWidget):
         self.sync_status.setProperty("role", "muted")
         sv.addWidget(self.sync_status)
 
-        # ------------- QR web server -------------
+        # ---------- QR web server ----------
         qr_gb = QGroupBox("QR Web Server")
         qv = QVBoxLayout(qr_gb)
         qv.setContentsMargins(20, 26, 20, 18)
         qv.setSpacing(12)
 
-        hint2 = QLabel("Scan with your phone to upload files or send text.")
-        hint2.setProperty("role", "muted")
-        qv.addWidget(hint2)
+        qv.addWidget(_muted("Scan with your phone to upload files or send text."))
 
         self.qr_label = QLabel("Server stopped")
         self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -122,26 +117,14 @@ class ToolsTab(QWidget):
         root.addWidget(sync_gb, 1)
         root.addWidget(qr_gb, 1)
 
-    # ---------- peer list ----------
+    # ---- peer list ----
     def upsert_peer(self, peer) -> None:
-        for i in range(self.peer_list.count()):
-            it = self.peer_list.item(i)
-            if it.data(Qt.ItemDataRole.UserRole) == peer.peer_id:
-                it.setText(peer.display)
-                it.setData(Qt.ItemDataRole.UserRole + 1, peer.name)
-                return
-        it = QListWidgetItem(peer.display)
-        it.setData(Qt.ItemDataRole.UserRole, peer.peer_id)
-        it.setData(Qt.ItemDataRole.UserRole + 1, peer.name)
-        self.peer_list.addItem(it)
+        self.peer_list.upsert(peer)
 
     def remove_peer(self, peer_id: str) -> None:
-        for i in range(self.peer_list.count()):
-            if self.peer_list.item(i).data(Qt.ItemDataRole.UserRole) == peer_id:
-                self.peer_list.takeItem(i)
-                break
+        self.peer_list.remove(peer_id)
 
-    # ---------- sync ----------
+    # ---- sync ----
     def _pick_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Select folder to sync")
         if folder:
@@ -152,18 +135,19 @@ class ToolsTab(QWidget):
         it = self.peer_list.currentItem()
         if it is None or not self._sync_folder:
             return
-        peer_name = it.data(Qt.ItemDataRole.UserRole + 1) or it.text()
-        self.sync_start_requested.emit(peer_name, self._sync_folder)
+        self.sync_start_requested.emit(PeerList.name_of(it), self._sync_folder)
 
     def set_sync_running(self, running: bool, status: str = "") -> None:
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
         self.sync_status.setText(status or ("Syncing" if running else "Idle"))
 
-    # ---------- QR ----------
+    # ---- QR ----
     def show_qr(self, url: str, pixmap: QPixmap) -> None:
         self.qr_label.setPixmap(pixmap.scaled(
-            280, 280, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            280, 280,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
         ))
         self.url_label.setText(url)
         self.qr_start_btn.setEnabled(False)
@@ -175,3 +159,9 @@ class ToolsTab(QWidget):
         self.url_label.setText("")
         self.qr_start_btn.setEnabled(True)
         self.qr_stop_btn.setEnabled(False)
+
+
+def _muted(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setProperty("role", "muted")
+    return lbl

@@ -17,14 +17,7 @@ from PyQt6.QtWidgets import (
 
 from ..util import fmt_size
 
-
 COLUMNS = ["Date", "Size", "# Files", "Direction", "Peer", "Type"]
-
-
-def _fmt_size(n) -> str:
-    if n in ("-", None):
-        return "-"
-    return fmt_size(n)
 
 
 class HistoryTab(QWidget):
@@ -52,16 +45,15 @@ class HistoryTab(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setShowGrid(False)
-        self.table.setAlternatingRowColors(False)
         self.table.verticalHeader().setDefaultSectionSize(36)
         v.addWidget(self.table, 1)
 
         row = QHBoxLayout()
         row.addStretch(1)
-        self.clear_btn = QPushButton("Clear History")
-        self.clear_btn.setProperty("role", "danger")
-        self.clear_btn.clicked.connect(self._on_clear)
-        row.addWidget(self.clear_btn)
+        clear_btn = QPushButton("Clear History")
+        clear_btn.setProperty("role", "danger")
+        clear_btn.clicked.connect(self._on_clear)
+        row.addWidget(clear_btn)
         v.addLayout(row)
 
         root.addWidget(card)
@@ -70,16 +62,18 @@ class HistoryTab(QWidget):
         self.table.setRowCount(0)
         # Newest first: storage appends chronologically, so reverse for display.
         for e in reversed(entries):
-            self.append(e, save=False, at_top=False)
+            self.append(e, at_top=False)
 
-    def append(self, entry: dict, save: bool = True, at_top: bool = True) -> None:
+    def append(self, entry: dict, at_top: bool = True) -> None:
         row = 0 if at_top else self.table.rowCount()
         self.table.insertRow(row)
         is_text = entry.get("type") == "QuickText"
+        size_val = entry.get("size", 0)
+        count_val = entry.get("count", 0)
         cells = [
             entry.get("date", ""),
-            "-" if is_text else _fmt_size(entry.get("size", 0)),
-            "-" if is_text else str(entry.get("count", 0)),
+            "-" if is_text or size_val in ("-", 0, None) else fmt_size(size_val),
+            "-" if is_text or count_val in ("-", 0, None) else str(count_val),
             entry.get("direction", ""),
             entry.get("peer", ""),
             entry.get("type", ""),

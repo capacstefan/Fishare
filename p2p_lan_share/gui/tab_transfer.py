@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import random
-from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -22,47 +21,31 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from .peer_list import PeerList
 from .theme import ToggleSwitch
-from ..util import fmt_size as _fmt_size
+from ..util import fmt_size
 
 
-def _fmt_speed(bps: float) -> str:
-    return f"{_fmt_size(bps)}/s"
-
-
-def _section_title(text: str) -> QLabel:
+def _h2(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setProperty("role", "h2")
     return lbl
 
 
-def _card(layout_widget: QWidget) -> QFrame:
-    """Wrap a widget in a rounded "card" frame."""
-    card = QFrame()
-    card.setObjectName("card")
-    v = QVBoxLayout(card)
-    v.setContentsMargins(16, 14, 16, 14)
-    v.setSpacing(10)
-    v.addWidget(layout_widget)
-    return card
+def _muted(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setProperty("role", "muted")
+    return lbl
 
 
-# Auto-clear finished/failed rows after this many ms.
 _CLEAR_DELAY_MS = 4000
 
 
 class TransferProgressRow(QWidget):
-    """One aggregate progress row per (direction, peer).
-
-    Shows total progress across all files of a single transfer. The
-    ``currently transmitting” filename is only shown in the caption; the bar
-    reflects whole-transfer bytes.
-    """
+    """Aggregate progress row per (direction, peer)."""
 
     def __init__(self, direction: str, peer_name: str) -> None:
         super().__init__()
-        self.direction = direction            # "up" (sending) | "down" (receiving)
-        self.peer_name = peer_name
         arrow = "↑" if direction == "up" else "↓"
         self._prefix = f"{arrow}  {peer_name}"
 
@@ -79,12 +62,11 @@ class TransferProgressRow(QWidget):
         v.addWidget(self.label)
         v.addWidget(self.bar)
 
-    def update_progress(self, filename: str, done: int, total: int,
-                        bps: float, eta: str) -> None:
+    def update_progress(self, filename, done, total, bps, eta) -> None:
         pct = int(done * 100 / total) if total else 0
         self.bar.setValue(pct)
         self.label.setText(
-            f"{self._prefix} — {pct}%  ({filename})  {_fmt_speed(bps)}  ETA {eta}"
+            f"{self._prefix} — {pct}%  ({filename})  {fmt_size(bps)}/s  ETA {eta}"
         )
 
     def set_status(self, status: str) -> None:
@@ -92,41 +74,37 @@ class TransferProgressRow(QWidget):
 
 
 class TransferTab(QWidget):
-    """File transfer tab. Talks to services via signals handled by MainWindow."""
-
-    # signals out to main window
     device_name_changed = pyqtSignal(str)
     online_toggled = pyqtSignal(bool)
     choose_download_dir = pyqtSignal()
-    send_requested = pyqtSignal(list, list, str)  # peers_names, files_paths, pin
+    send_requested = pyqtSignal(list, list, str)
     mute_toggled = pyqtSignal(str)
 
     def __init__(self, settings: dict, parent=None) -> None:
         super().__init__(parent)
         self._selected_files: list[str] = []
-        # Rows keyed by (direction, peer_name): direction is "up"|"down".
         self._rows: dict[tuple[str, str], TransferProgressRow] = {}
+        self._pin_value = ""
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(16)
 
-        # ---------- Header card: Device name + Online toggle ----------
+        # Header card
         header = QFrame()
         header.setObjectName("card")
         hrow = QHBoxLayout(header)
         hrow.setContentsMargins(20, 16, 20, 16)
         hrow.setSpacing(14)
 
-        name_lbl = QLabel("Device")
-        name_lbl.setProperty("role", "muted")
         self.name_edit = QLineEdit(settings["device_name"])
-        self.name_edit.setMaximumWidth(320)
+        self.name_edit.setMinimumWidth(260)
+        self.name_edit.setMaximumWidth(420)
         self.name_edit.setMinimumHeight(36)
         self.name_edit.editingFinished.connect(
             lambda: self.device_name_changed.emit(self.name_edit.text().strip())
         )
-        hrow.addWidget(name_lbl)
+        hrow.addWidget(_muted("Device"))
         hrow.addWidget(self.name_edit)
         hrow.addStretch(1)
 
@@ -137,58 +115,53 @@ class TransferTab(QWidget):
 
         root.addWidget(header)
 
-        # ---------- Main split: peers card | files card ----------
+        # Peers + files split
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setHandleWidth(14)
         split.setChildrenCollapsible(False)
 
-        # --- Peers card ---
         peers_card = QFrame()
         peers_card.setObjectName("card")
         pv = QVBoxLayout(peers_card)
         pv.setContentsMargins(18, 16, 18, 16)
         pv.setSpacing(12)
-        pv.addWidget(_section_title("Peers"))
+        pv.addWidget(_h2("Peers"))
 
         peer_cols = QHBoxLayout()
         peer_cols.setSpacing(14)
 
         left = QVBoxLayout()
         left.setSpacing(8)
-        disc_lbl = QLabel("Discovered")
-        disc_lbl.setProperty("role", "muted")
-        left.addWidget(disc_lbl)
-        self.discovered_list = QListWidget()
-        self.discovered_list.setMinimumHeight(110)
-        self.discovered_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.discovered_list.customContextMenuRequested.connect(self._on_discovered_menu)
+        left.addWidget(_muted("Discovered"))
+        self.discovered_list = PeerList(mute_on_right_click=True)
+        self.discovered_list.setMinimumHeight(80)
+        self.discovered_list.mute_requested.connect(self.mute_toggled.emit)
         self.discovered_list.itemDoubleClicked.connect(self._on_discover_dclick)
-        left.addWidget(self.discovered_list)
+        left.addWidget(self.discovered_list, 1)
 
         right = QVBoxLayout()
         right.setSpacing(8)
-        sel_lbl = QLabel("Selected")
-        sel_lbl.setProperty("role", "muted")
-        right.addWidget(sel_lbl)
+        right.addWidget(_muted("Selected"))
         self.selected_list = QListWidget()
-        self.selected_list.setMinimumHeight(110)
-        self.selected_list.itemDoubleClicked.connect(self._on_selected_dclick)
-        right.addWidget(self.selected_list)
+        self.selected_list.setMinimumHeight(80)
+        self.selected_list.itemDoubleClicked.connect(
+            lambda it: self.selected_list.takeItem(self.selected_list.row(it))
+        )
+        right.addWidget(self.selected_list, 1)
         clear_sel_btn = QPushButton("Clear All")
         clear_sel_btn.clicked.connect(self.selected_list.clear)
         right.addWidget(clear_sel_btn)
 
         peer_cols.addLayout(left, 1)
         peer_cols.addLayout(right, 1)
-        pv.addLayout(peer_cols)
+        pv.addLayout(peer_cols, 1)
 
-        # --- Files card ---
         files_card = QFrame()
         files_card.setObjectName("card")
         fv = QVBoxLayout(files_card)
         fv.setContentsMargins(18, 16, 18, 16)
         fv.setSpacing(12)
-        fv.addWidget(_section_title("Files"))
+        fv.addWidget(_h2("Files"))
 
         self.files_list = QListWidget()
         self.files_list.itemDoubleClicked.connect(self._on_file_dclick)
@@ -213,7 +186,7 @@ class TransferTab(QWidget):
         split.setSizes([560, 440])
         root.addWidget(split, 1)
 
-        # ---------- Action bar: PIN + Send ----------
+        # Action bar
         action = QFrame()
         action.setObjectName("card")
         arow = QHBoxLayout(action)
@@ -227,7 +200,6 @@ class TransferTab(QWidget):
         self.pin_label = QLabel("")
         self.pin_label.setProperty("role", "pin")
         arow.addWidget(self.pin_label)
-
         arow.addStretch(1)
 
         self.send_btn = QPushButton("Send")
@@ -239,13 +211,13 @@ class TransferTab(QWidget):
 
         root.addWidget(action)
 
-        # ---------- Progress area ----------
+        # Progress area
         progress_card = QFrame()
         progress_card.setObjectName("card")
         prl = QVBoxLayout(progress_card)
         prl.setContentsMargins(18, 14, 18, 14)
         prl.setSpacing(10)
-        prl.addWidget(_section_title("Transfers"))
+        prl.addWidget(_h2("Transfers"))
 
         self._progress_host = QWidget()
         self._progress_layout = QVBoxLayout(self._progress_host)
@@ -263,48 +235,23 @@ class TransferTab(QWidget):
         progress_card.setMaximumHeight(150)
         root.addWidget(progress_card)
 
-    # ---------- peer list management ----------
+    # ---- peer list ----
     def upsert_peer(self, peer) -> None:
-        # Update discovered list
-        for i in range(self.discovered_list.count()):
-            it = self.discovered_list.item(i)
-            if it.data(Qt.ItemDataRole.UserRole) == peer.peer_id:
-                it.setText(peer.display)
-                it.setData(Qt.ItemDataRole.UserRole + 1, peer.name)
-                return
-        it = QListWidgetItem(peer.display)
-        it.setData(Qt.ItemDataRole.UserRole, peer.peer_id)
-        it.setData(Qt.ItemDataRole.UserRole + 1, peer.name)
-        self.discovered_list.addItem(it)
+        self.discovered_list.upsert(peer)
 
     def remove_peer(self, peer_id: str) -> None:
-        for i in range(self.discovered_list.count()):
-            it = self.discovered_list.item(i)
-            if it.data(Qt.ItemDataRole.UserRole) == peer_id:
-                self.discovered_list.takeItem(i)
-                break
-        # also remove from selected if present
-        name_removed = None
-        for i in range(self.selected_list.count()):
-            it = self.selected_list.item(i)
-            if it.data(Qt.ItemDataRole.UserRole) == peer_id:
-                name_removed = it.text()
-                self.selected_list.takeItem(i)
-                break
+        self.discovered_list.remove(peer_id)
+        self.remove_offline_selected(peer_id)
 
     def remove_offline_selected(self, peer_id: str) -> None:
-        """When a peer goes offline, drop it from Selected."""
         for i in range(self.selected_list.count()):
-            it = self.selected_list.item(i)
-            if it.data(Qt.ItemDataRole.UserRole) == peer_id:
+            if self.selected_list.item(i).data(Qt.ItemDataRole.UserRole) == peer_id:
                 self.selected_list.takeItem(i)
                 return
 
-    # ---------- events ----------
     def _on_discover_dclick(self, item: QListWidgetItem) -> None:
-        pid = item.data(Qt.ItemDataRole.UserRole)
-        name = item.data(Qt.ItemDataRole.UserRole + 1) or item.text()
-        # toggle in selected
+        pid = PeerList.pid_of(item)
+        name = PeerList.name_of(item)
         for i in range(self.selected_list.count()):
             if self.selected_list.item(i).data(Qt.ItemDataRole.UserRole) == pid:
                 self.selected_list.takeItem(i)
@@ -313,19 +260,7 @@ class TransferTab(QWidget):
         it.setData(Qt.ItemDataRole.UserRole, pid)
         self.selected_list.addItem(it)
 
-    def _on_selected_dclick(self, item: QListWidgetItem) -> None:
-        self.selected_list.takeItem(self.selected_list.row(item))
-
-    def _on_discovered_menu(self, pos) -> None:
-        # Right-click on a discovered peer directly toggles mute (no menu).
-        # Emit the stable peer_id (cert fingerprint) so mute survives renames.
-        item = self.discovered_list.itemAt(pos)
-        if item is None:
-            return
-        pid = item.data(Qt.ItemDataRole.UserRole)
-        if pid:
-            self.mute_toggled.emit(pid)
-
+    # ---- files ----
     def _add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Select files")
         for p in paths:
@@ -343,30 +278,23 @@ class TransferTab(QWidget):
         if 0 <= row < len(self._selected_files):
             self._selected_files.pop(row)
 
+    # ---- PIN / send ----
     def _on_pin_toggle(self, checked: bool) -> None:
         if checked:
-            pin = f"{random.randint(0, 9999):04d}"
-            self.pin_label.setText(f"PIN: {pin}")
+            self._pin_value = f"{random.randint(0, 9999):04d}"
+            self.pin_label.setText(f"PIN: {self._pin_value}")
         else:
+            self._pin_value = ""
             self.pin_label.setText("")
-
-    def _current_pin(self) -> str:
-        if not self.pin_chk.isChecked():
-            return ""
-        txt = self.pin_label.text()
-        return txt.replace("PIN:", "").strip()
 
     def _on_send(self) -> None:
         peers = [self.selected_list.item(i).text() for i in range(self.selected_list.count())]
         files = list(self._selected_files)
-        if not peers or not files:
-            return
-        pin = self._current_pin()
-        # Rows are created lazily on the first progress/status event.
-        self.send_requested.emit(peers, files, pin)
+        if peers and files:
+            self.send_requested.emit(peers, files, self._pin_value)
 
-    # ---------- internal row management ----------
-    def _get_or_create_row(self, direction: str, peer: str) -> TransferProgressRow:
+    # ---- progress rows ----
+    def _row(self, direction: str, peer: str) -> TransferProgressRow:
         key = (direction, peer)
         row = self._rows.get(key)
         if row is None:
@@ -377,34 +305,30 @@ class TransferTab(QWidget):
 
     def _schedule_clear(self, direction: str, peer: str) -> None:
         key = (direction, peer)
-        QTimer.singleShot(_CLEAR_DELAY_MS, lambda: self._remove_row(key))
 
-    def _remove_row(self, key: tuple[str, str]) -> None:
-        row = self._rows.pop(key, None)
-        if row is not None:
-            self._progress_layout.removeWidget(row)
-            row.deleteLater()
+        def drop():
+            r = self._rows.pop(key, None)
+            if r is not None:
+                self._progress_layout.removeWidget(r)
+                r.deleteLater()
 
-    # ---------- slots from network: sending ----------
-    def on_task_progress(self, peer: str, filename: str, done: int, total: int,
-                        bps: float, eta: str) -> None:
-        self._get_or_create_row("up", peer).update_progress(filename, done, total, bps, eta)
+        QTimer.singleShot(_CLEAR_DELAY_MS, drop)
 
-    def on_task_status(self, peer: str, status: str) -> None:
-        row = self._get_or_create_row("up", peer)
-        row.set_status(status)
+    def on_task_progress(self, peer, filename, done, total, bps, eta) -> None:
+        self._row("up", peer).update_progress(filename, done, total, bps, eta)
+
+    def on_task_status(self, peer, status) -> None:
+        self._row("up", peer).set_status(status)
         if status in ("done", "failed", "rejected", "offline"):
             self._schedule_clear("up", peer)
 
-    # ---------- slots from network: receiving ----------
-    def on_recv_progress(self, sender: str, filename: str, done: int, total: int,
-                         bps: float, eta: str) -> None:
-        self._get_or_create_row("down", sender).update_progress(filename, done, total, bps, eta)
+    def on_recv_progress(self, sender, filename, done, total, bps, eta) -> None:
+        self._row("down", sender).update_progress(filename, done, total, bps, eta)
 
-    def on_recv_completed(self, sender: str) -> None:
-        self._get_or_create_row("down", sender).set_status("done")
+    def on_recv_completed(self, sender) -> None:
+        self._row("down", sender).set_status("done")
         self._schedule_clear("down", sender)
 
-    def on_recv_failed(self, sender: str, reason: str) -> None:
-        self._get_or_create_row("down", sender).set_status(f"failed: {reason}")
+    def on_recv_failed(self, sender, reason) -> None:
+        self._row("down", sender).set_status(f"failed: {reason}")
         self._schedule_clear("down", sender)

@@ -36,9 +36,7 @@ def load_settings() -> dict:
         "online": True,
         "download_dir": str(config.DEFAULT_DOWNLOAD_DIR),
     }
-    data = _load(config.SETTINGS_FILE, {})
-    defaults.update(data)
-    return defaults
+    return {**defaults, **_load(config.SETTINGS_FILE, {})}
 
 
 def save_settings(settings: dict) -> None:

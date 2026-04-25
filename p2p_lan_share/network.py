@@ -39,10 +39,14 @@ from .util import unique_path
 
 
 # =============================================================================
-# Low-level helpers
+# Low-level helpers (public so sync.py and GUI can reuse them)
 # =============================================================================
-def _send_json(sock: ssl.SSLSocket, obj: dict) -> None:
+def send_json(sock: ssl.SSLSocket, obj: dict) -> None:
     sock.sendall((json.dumps(obj) + "\n").encode("utf-8"))
+
+
+# Backwards-compat alias used elsewhere internally.
+_send_json = send_json
 
 
 class LineReader:
@@ -98,7 +102,7 @@ def _human_eta(remaining: int, bps: float) -> str:
     return f"{h}h{m:02d}m"
 
 
-def _tune_sock(raw: socket.socket) -> None:
+def tune_sock(raw: socket.socket) -> None:
     """Raise buffer sizes and disable Nagle for better LAN throughput."""
     try:
         raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -106,6 +110,9 @@ def _tune_sock(raw: socket.socket) -> None:
         raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
     except OSError:
         pass
+
+
+_tune_sock = tune_sock
 
 
 # =============================================================================
@@ -118,11 +125,35 @@ def _server_ctx() -> ssl.SSLContext:
     return ctx
 
 
-def _client_ctx() -> ssl.SSLContext:
+def client_ctx() -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+
+_client_ctx = client_ctx
+
+
+def connect_and_offer(addr: str, port: int, offer: dict, accept_timeout: float = 180.0) -> ssl.SSLSocket:
+    """Open a TLS connection, send the offer, and wait for an accepting response.
+
+    Returns the still-open socket on accept. Raises on connection error or rejection.
+    """
+    raw = socket.create_connection((addr, port), timeout=10)
+    tune_sock(raw)
+    sock = client_ctx().wrap_socket(raw, server_hostname=addr)
+    try:
+        send_json(sock, offer)
+        sock.settimeout(accept_timeout)
+        resp = LineReader(sock).read_json()
+    except Exception:
+        sock.close()
+        raise
+    if not resp.get("accept"):
+        sock.close()
+        raise RuntimeError(resp.get("reason", "rejected"))
+    return sock
 
 
 # =============================================================================
@@ -175,7 +206,6 @@ class TransferServer(QObject):
     recv_failed = pyqtSignal(str, str)         # sender_name, reason
     text_received = pyqtSignal(str, str)
     sync_started = pyqtSignal(str, str, object)
-    impersonation_detected = pyqtSignal(str)   # claimed sender_name
     log = pyqtSignal(str)
 
     def __init__(self, get_state: Callable[[], dict]) -> None:
@@ -234,17 +264,6 @@ class TransferServer(QObject):
             sender_name = offer_msg.get("from", "Unknown")
             sender_id = offer_msg.get("from_id", "")
             kind = offer_msg.get("kind", "")
-
-            # Impersonation check: if we already know a peer with this name but
-            # under a *different* stable id (cert fingerprint), warn the user.
-            # A renamed peer keeps its id; an impersonator has a fresh id.
-            known_by_name = state.get("known_ids_by_name", {}).get(sender_name)
-            if known_by_name and sender_id and known_by_name != sender_id:
-                self.impersonation_detected.emit(sender_name)
-                self.log.emit(
-                    f"Impersonation warning: {sender_name!r} claims id={sender_id} "
-                    f"but known id={known_by_name}"
-                )
 
             # Auto-reject: offline or muted (mute is keyed on peer_id / fingerprint)
             if not state["online"]:
