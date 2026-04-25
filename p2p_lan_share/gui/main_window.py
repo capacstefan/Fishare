@@ -274,12 +274,13 @@ class MainWindow(QMainWindow):
             return
 
         total = sum(s.size for s in specs)
-        offline: list[str] = []
         sent = 0
         for name in peer_names:
             peer = self.registry.find_by_name(name)
-            if peer is None or peer.status != "online":
-                offline.append(name)
+            if peer is None:
+                self.tab_transfer.on_task_status(name, "offline")
+                continue
+            if peer.status != "online":
                 self.tab_transfer.on_task_status(name, "offline")
                 continue
             task = self._new_task(peer, "files", files=specs, pin=pin)
@@ -291,24 +292,15 @@ class MainWindow(QMainWindow):
             )
             self._submit_task(task)
             sent += 1
-
-        if offline:
-            QMessageBox.warning(
-                self, "Peer offline",
-                "Could not send to: " + ", ".join(offline) +
-                "\n\nThese peers are offline or unreachable.",
-            )
         if sent:
             self.notify(f"Sending to {sent} peer(s)…")
 
     # ---------- send text ----------
     def _on_send_text(self, peer_names: list, text: str) -> None:
         sent = 0
-        offline: list[str] = []
         for name in peer_names:
             peer = self.registry.find_by_name(name)
             if peer is None or peer.status != "online":
-                offline.append(name)
                 continue
             task = self._new_task(peer, "text", text=text)
             task.finished.connect(
@@ -317,12 +309,6 @@ class MainWindow(QMainWindow):
             )
             self._submit_task(task)
             sent += 1
-        if offline:
-            QMessageBox.warning(
-                self, "Peer offline",
-                "Could not send to: " + ", ".join(offline) +
-                "\n\nThese peers are offline or unreachable.",
-            )
         if sent:
             self.notify(f"Quick text sent to {sent} peer(s)")
 
@@ -340,6 +326,8 @@ class MainWindow(QMainWindow):
             self.tab_history.append(entry)
             self.notify(f"Sent to {peer_name}")
         else:
+            if str(reason).strip().lower() == "offline":
+                return
             self.notify(f"Failed to {peer_name}: {reason}")
 
     # ---------- receive ----------

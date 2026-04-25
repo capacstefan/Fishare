@@ -80,6 +80,7 @@ class PeerRegistry(QObject):
         self._zc: Zeroconf | None = None
         self._info: ServiceInfo | None = None
         self._browser: ServiceBrowser | None = None
+        self._announce_lock = threading.Lock()
 
     # ---------- lifecycle ----------
     def start(self) -> None:
@@ -104,7 +105,7 @@ class PeerRegistry(QObject):
         safe = "".join(c for c in self.device_name if c.isalnum() or c in "-_ ")[:40] or "device"
         return f"{safe}-{self.peer_id}.{config.SERVICE_TYPE}"
 
-    def _build_info(self) -> ServiceInfo:
+    def _build_info(self, service_name: str | None = None) -> ServiceInfo:
         ip = _local_ip()
         props = {
             b"name": self.device_name.encode("utf-8"),
@@ -113,7 +114,7 @@ class PeerRegistry(QObject):
         }
         return ServiceInfo(
             type_=config.SERVICE_TYPE,
-            name=self._service_name(),
+            name=service_name or self._service_name(),
             addresses=[socket.inet_aton(ip)],
             port=config.TCP_PORT,
             properties=props,
@@ -139,23 +140,34 @@ class PeerRegistry(QObject):
         """
         if self._zc is None:
             return
-        new_info = self._build_info()
-        self._info = new_info
         zc = self._zc
 
         def _do() -> None:
-            try:
-                zc.update_service(new_info)
-            except Exception:
-                # Fallback: full re-register if update is unsupported.
+            with self._announce_lock:
+                old_info = self._info
+                # Keep the registered service instance name stable so updates
+                # are always applied to the same mDNS record.
+                name = old_info.name if old_info is not None else None
+                new_info = self._build_info(service_name=name)
                 try:
-                    zc.unregister_service(new_info)
+                    if old_info is None:
+                        zc.register_service(new_info, allow_name_change=True)
+                    else:
+                        zc.update_service(new_info)
+                    self._info = new_info
+                    return
                 except Exception:
-                    pass
-                try:
-                    zc.register_service(new_info, allow_name_change=True)
-                except Exception:
-                    pass
+                    # Fallback: replace the old registration cleanly.
+                    if old_info is not None:
+                        try:
+                            zc.unregister_service(old_info)
+                        except Exception:
+                            pass
+                    try:
+                        zc.register_service(new_info, allow_name_change=True)
+                        self._info = new_info
+                    except Exception:
+                        pass
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -207,7 +219,8 @@ class PeerRegistry(QObject):
             return  # skip self
 
         pname = (props.get(b"name") or b"").decode("utf-8", "ignore") or name
-        status = (props.get(b"status") or b"online").decode("ascii", "ignore")
+        status_raw = (props.get(b"status") or b"online").decode("ascii", "ignore").strip().lower()
+        status = "offline" if status_raw == "offline" else "online"
         addr = socket.inet_ntoa(info.addresses[0]) if info.addresses else ""
         port = info.port or config.TCP_PORT
 
