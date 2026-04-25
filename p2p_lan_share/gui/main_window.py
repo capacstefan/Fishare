@@ -148,6 +148,7 @@ class MainWindow(QMainWindow):
         tt.choose_download_dir.connect(self._pick_download_dir)
         tt.send_requested.connect(self._on_send_files)
         tt.mute_toggled.connect(self._on_toggle_mute)
+        tt.cancel_requested.connect(self.cancel_transfer)
 
         txt.send_text_requested.connect(self._on_send_text)
         txt.mute_toggled.connect(self._on_toggle_mute)
@@ -243,6 +244,14 @@ class MainWindow(QMainWindow):
         )
         self.queue.submit(task)
 
+    def cancel_transfer(self, direction: str, peer_name: str) -> None:
+        if direction == "up":
+            for t in list(self._live_tasks):
+                if t.peer_name == peer_name:
+                    t.cancel()
+        elif direction == "down":
+            self.server.cancel(peer_name)
+
     def _new_task(self, peer, kind: str, **kwargs) -> TransferTask:
         return TransferTask(
             peer_name=peer.name,
@@ -265,7 +274,7 @@ class MainWindow(QMainWindow):
             if size > config.MAX_FILE_SIZE:
                 QMessageBox.warning(
                     self, "File too large",
-                    f"{pth.name} exceeds the 2 GB limit and will be skipped.",
+                    f"{pth.name} exceeds the {config.MAX_FILE_SIZE // (1024**3)} GB limit and will be skipped.",
                 )
                 continue
             specs.append(FileSpec(path=str(pth), size=size))

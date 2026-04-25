@@ -216,6 +216,17 @@ class TransferServer(QObject):
         self._ctx: ssl.SSLContext | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._active_sockets: dict[str, ssl.SSLSocket] = {}
+
+    def cancel(self, peer_name: str) -> None:
+        """Cancel an incoming transfer by name by closing its socket."""
+        sock = self._active_sockets.get(peer_name)
+        if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+                sock.close()
+            except Exception:
+                pass
 
     def start(self) -> None:
         self._ctx = _server_ctx()
@@ -294,11 +305,15 @@ class TransferServer(QObject):
                 text="",  # body is delivered AFTER accept for text offers
                 folder=offer_msg.get("folder", ""),
             )
+            
+            self._active_sockets[sender_name] = sock
+            
             self.offer_received.emit(offer)
             accepted, pin = offer.wait(timeout=180.0)
 
             if not accepted:
                 _send_json(sock, {"type": "response", "accept": False, "reason": "rejected"})
+                self._active_sockets.pop(sender_name, None)
                 return
             _send_json(sock, {"type": "response", "accept": True, "pin": pin})
 
@@ -319,6 +334,7 @@ class TransferServer(QObject):
         except Exception as e:
             self.log.emit(f"Receiver error from {addr}: {e}")
         finally:
+            self._active_sockets.pop(sender_name, None)
             if sock is not None:
                 try:
                     sock.close()
@@ -399,13 +415,30 @@ class TransferTask(QObject):
         self.files = files or []
         self.text = text
         self.pin = pin  # empty means no PIN required
+        self._canceled = False
+        self._sock: socket.socket | None = None
+
+    def cancel(self) -> None:
+        self._canceled = True
+        try:
+            if self._sock:
+                self._sock.shutdown(socket.SHUT_RDWR)
+                self._sock.close()
+        except:
+            pass
 
     def run(self) -> None:
         ctx = _client_ctx()
+        if self._canceled:
+            self.status.emit(self.peer_name, "canceled")
+            self.finished.emit(self.peer_name, False, "canceled by user")
+            return
+        
         try:
             raw = socket.create_connection((self.peer_addr, self.peer_port), timeout=10)
             _tune_sock(raw)
             sock = ctx.wrap_socket(raw, server_hostname=self.peer_addr)
+            self._sock = sock
         except Exception as e:
             self.status.emit(self.peer_name, "failed")
             self.finished.emit(self.peer_name, False, f"connect: {e}")
@@ -478,7 +511,12 @@ class TransferTask(QObject):
         last_emit = start
         with open(spec.path, "rb", buffering=1 << 20) as f:
             while True:
-                buf = f.read(config.CHUNK)
+                if self._canceled:
+                    raise RuntimeError("Canceled by user")
+                try:
+                    buf = f.read(config.CHUNK)
+                except Exception:
+                    raise
                 if not buf:
                     break
                 sock.sendall(buf)

@@ -125,27 +125,20 @@ class PeerRegistry(QObject):
         self._zc.register_service(self._info, allow_name_change=True)
 
     def _reannounce(self) -> None:
-        """Goodbye + hello with the current TXT record.
-
-        We deliberately do a full unregister/re-register instead of
-        ``update_service``: the latter is best-effort (some peers may
-        miss the TXT update if their cache is fresh), while a fresh
-        registration sends a multicast announcement that every remote
-        browser sees as Removed → Added and re-reads. Slight visual
-        flicker on remote peer lists is the only cost.
-        """
+        """Update the mDNS record in the background to avoid UI delays."""
         if self._zc is None:
             return
-        try:
-            if self._info is not None:
-                self._zc.unregister_service(self._info)
-        except Exception:
-            pass
+
         self._info = self._build_info()
-        try:
-            self._zc.register_service(self._info, allow_name_change=True)
-        except Exception:
-            pass
+
+        def do_update() -> None:
+            try:
+                self._zc.update_service(self._info)
+            except Exception:
+                pass
+
+        import threading
+        threading.Thread(target=do_update, daemon=True).start()
 
     def set_device_name(self, name: str) -> None:
         self.device_name = name or config.default_device_name()

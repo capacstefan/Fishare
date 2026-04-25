@@ -18,7 +18,7 @@ SOCKET_TIMEOUT = 30            # seconds for control messages
 # Transfer tuning
 CHUNK = 1 * 1024 * 1024        # 1 MB read/send chunk (single size — KISS)
 
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+MAX_FILE_SIZE = 500 * 1024 * 1024 * 1024  # 500 GB
 QUICK_TEXT_MAX_CHARS = 500
 
 # Storage (Windows: %APPDATA%\p2p_lan_share\)

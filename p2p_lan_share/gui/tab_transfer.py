@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QVBoxLayout,
     QWidget,
+    QToolButton,
 )
 
 from .peer_list import PeerList
@@ -44,8 +45,12 @@ _CLEAR_DELAY_MS = 4000
 class TransferProgressRow(QWidget):
     """Aggregate progress row per (direction, peer)."""
 
+    cancel_requested = pyqtSignal(str, str)
+
     def __init__(self, direction: str, peer_name: str) -> None:
         super().__init__()
+        self.direction = direction
+        self.peer_name = peer_name
         arrow = "↑" if direction == "up" else "↓"
         self._prefix = f"{arrow}  {peer_name}"
 
@@ -55,12 +60,29 @@ class TransferProgressRow(QWidget):
 
         self.label = QLabel(f"{self._prefix} — queued")
         self.label.setProperty("role", "muted")
+        
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
         self.bar.setMaximumHeight(10)
         self.bar.setTextVisible(False)
+        row.addWidget(self.bar, 1)
+        
+        self.cancel_btn = QToolButton()
+        self.cancel_btn.setText("❌")
+        self.cancel_btn.setToolTip("Cancel Transfer")
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        row.addWidget(self.cancel_btn)
+
         v.addWidget(self.label)
-        v.addWidget(self.bar)
+        v.addLayout(row)
+
+    def _on_cancel(self) -> None:
+        self.cancel_btn.setEnabled(False)
+        self.cancel_requested.emit(self.direction, self.peer_name)
 
     def update_progress(self, filename, done, total, bps, eta) -> None:
         pct = int(done * 100 / total) if total else 0
@@ -71,6 +93,8 @@ class TransferProgressRow(QWidget):
 
     def set_status(self, status: str) -> None:
         self.label.setText(f"{self._prefix} — {status}")
+        if status in ("done", "failed", "rejected", "offline", "canceled", "canceled by user"):
+            self.cancel_btn.setEnabled(False)
 
 
 class TransferTab(QWidget):
@@ -79,6 +103,7 @@ class TransferTab(QWidget):
     choose_download_dir = pyqtSignal()
     send_requested = pyqtSignal(list, list, str)
     mute_toggled = pyqtSignal(str)
+    cancel_requested = pyqtSignal(str, str)
 
     def __init__(self, settings: dict, parent=None) -> None:
         super().__init__(parent)
@@ -299,6 +324,7 @@ class TransferTab(QWidget):
         row = self._rows.get(key)
         if row is None:
             row = TransferProgressRow(direction, peer)
+            row.cancel_requested.connect(self.cancel_requested.emit)
             self._progress_layout.insertWidget(self._progress_layout.count() - 1, row)
             self._rows[key] = row
         return row
@@ -319,7 +345,7 @@ class TransferTab(QWidget):
 
     def on_task_status(self, peer, status) -> None:
         self._row("up", peer).set_status(status)
-        if status in ("done", "failed", "rejected", "offline"):
+        if status in ("done", "failed", "rejected", "offline", "canceled"):
             self._schedule_clear("up", peer)
 
     def on_recv_progress(self, sender, filename, done, total, bps, eta) -> None:
