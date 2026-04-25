@@ -285,6 +285,7 @@ class MainWindow(QMainWindow):
         for name in peer_names:
             peer = self.registry.find_by_name(name)
             if peer is None or peer.status != "online":
+                self.show_message(f"Cannot send, {name} is offline")
                 self.tab_transfer.on_task_status(name, "offline")
                 continue
             task = self._new_task(peer, "files", files=specs, pin=pin)
@@ -303,6 +304,7 @@ class MainWindow(QMainWindow):
         for name in peer_names:
             peer = self.registry.find_by_name(name)
             if peer is None or peer.status != "online":
+                self.show_message(f"Cannot send text, {name} is offline")
                 continue
             task = self._new_task(peer, "text", text=text)
             task.finished.connect(
