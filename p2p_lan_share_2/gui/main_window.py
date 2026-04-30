@@ -4,9 +4,11 @@ from __future__ import annotations
 import datetime as _dt
 from pathlib import Path
 
-from PyQt6.QtCore import pyqtSlot
+from PyQt6.QtCore import Qt, QPropertyAnimation, QTimer, pyqtSlot
 from PyQt6.QtWidgets import (
     QFileDialog,
+    QGraphicsOpacityEffect,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QStatusBar,
@@ -31,11 +33,55 @@ def _now() -> str:
     return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _is_fingerprint(s: str) -> bool:
+    return len(s) == 16 and all(c in "0123456789abcdef" for c in s)
+
+
+class NotificationBar(QLabel):
+    """Bottom notification with simple fade in/out."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet(
+            "background-color: rgba(29, 29, 31, 0.92);"
+            "color: white;"
+            "padding: 4px 12px;"
+            "border-radius: 9px;"
+            "font-size: 10pt;"
+            "font-weight: 500;"
+        )
+        self._effect = QGraphicsOpacityEffect(self)
+        self._effect.setOpacity(0.0)
+        self.setGraphicsEffect(self._effect)
+        self.setFixedHeight(26)
+        self._anim = QPropertyAnimation(self._effect, b"opacity", self)
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(lambda: self._fade(0.0, 500))
+
+    def show_message(self, text: str, duration_ms: int = 2500) -> None:
+        self.setText(text)
+        self._fade(1.0, 300)
+        self._hide_timer.start(duration_ms)
+
+    def _fade(self, target: float, duration: int) -> None:
+        self._anim.stop()
+        self._anim.setDuration(duration)
+        self._anim.setStartValue(self._effect.opacity())
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.settings = storage.load_settings()
-        self._muted: set[str] = set(storage.load_muted())
+        # Keep only fingerprint-style mutes (drops legacy name-based entries
+        # from older versions silently).
+        self._muted: set[str] = {m for m in storage.load_muted() if _is_fingerprint(m)}
+        if self._muted != storage.load_muted():
+            storage.save_muted(self._muted)
 
         self.setWindowTitle(config.APP_NAME)
         self.resize(1200, 780)
@@ -63,14 +109,17 @@ class MainWindow(QMainWindow):
         self.tab_text = QuickTextTab()
         self.tab_tools = ToolsTab()
         self.tab_history = HistoryTab(clear_cb=storage.clear_history)
-        for w, label in (
+        for w, label in [
             (self.tab_transfer, "File Transfer"),
             (self.tab_text, "Quick Text"),
             (self.tab_tools, "Tools"),
             (self.tab_history, "History"),
-        ):
+        ]:
             self.tabs.addTab(w, label)
         layout.addWidget(self.tabs, 1)
+
+        self.notification = NotificationBar(self)
+        layout.addWidget(self.notification)
 
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar(self))
@@ -134,9 +183,7 @@ class MainWindow(QMainWindow):
         }
 
     def notify(self, text: str) -> None:
-        # Use the existing status bar for transient messages — same UX, no
-        # custom fade widget needed.
-        self.statusBar().showMessage(text, 2500)
+        self.notification.show_message(text)
 
     # ---------- peer events ----------
     @pyqtSlot(object)
@@ -361,7 +408,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Sync", "Peer not available.")
             return
         try:
-            wire = connect_and_offer(peer.address, peer.port, {
+            sock = connect_and_offer(peer.address, peer.port, {
                 "type": "offer", "kind": "sync",
                 "from": self.settings["device_name"],
                 "from_id": self.registry.peer_id,
@@ -371,7 +418,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Sync", f"Could not start sync: {e}")
             return
 
-        self.sync_sender = SyncSender(wire, folder)
+        self.sync_sender = SyncSender(sock, folder)
         self.sync_sender.event.connect(lambda m: self.tab_tools.set_sync_running(True, m))
         self.sync_sender.finished.connect(self._on_sync_sender_done)
         self.sync_sender.start()
@@ -389,16 +436,18 @@ class MainWindow(QMainWindow):
         self.tab_tools.set_sync_running(False, f"stopped ({reason})")
         self.notify("Sync stopped")
 
-    def _on_incoming_sync(self, sender_name: str, folder: str, wire) -> None:
+    def _on_incoming_sync(self, sender_name: str, folder: str, sock) -> None:
         dest = QFileDialog.getExistingDirectory(
             self, f"Select destination for sync from {sender_name}",
             self.settings["download_dir"],
         )
         if not dest:
-            try: wire.close()
-            except Exception: pass
+            try:
+                sock.close()
+            except Exception:
+                pass
             return
-        self.sync_receiver = SyncReceiver(wire, dest)
+        self.sync_receiver = SyncReceiver(sock, dest)
         self.sync_receiver.event.connect(lambda m: self.tab_tools.set_sync_running(True, m))
         self.sync_receiver.finished.connect(self._on_sync_receiver_done)
         self.sync_receiver.start()

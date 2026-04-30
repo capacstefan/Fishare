@@ -18,7 +18,8 @@ from PyQt6.QtGui import QImage, QPixmap
 from werkzeug.serving import make_server
 
 from . import config
-from .util import local_ip, unique_path
+from .discovery import _local_ip
+from .util import unique_path
 
 PAGE = """<!doctype html>
 <html><head>
@@ -146,7 +147,7 @@ class QrWebServer(QObject):
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 
-        ip = local_ip()
+        ip = _local_ip()
         url = f"http://{ip}:{config.WEB_PORT}/{self._token}/"
         self.started.emit(url, self._make_qr_pixmap(url))
 

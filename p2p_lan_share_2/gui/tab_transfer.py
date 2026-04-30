@@ -23,8 +23,19 @@ from PyQt6.QtWidgets import (
 
 from .peer_list import PeerList
 from .theme import ToggleSwitch
-from ._widgets import h2 as _h2, muted as _muted
 from ..util import fmt_size
+
+
+def _h2(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setProperty("role", "h2")
+    return lbl
+
+
+def _muted(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setProperty("role", "muted")
+    return lbl
 
 
 _CLEAR_DELAY_MS = 4000

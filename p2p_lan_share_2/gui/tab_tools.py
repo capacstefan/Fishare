@@ -15,7 +15,6 @@ from PyQt6.QtWidgets import (
 )
 
 from .peer_list import PeerList
-from ._widgets import muted as _muted
 
 
 class ToolsTab(QWidget):
@@ -160,3 +159,9 @@ class ToolsTab(QWidget):
         self.url_label.setText("")
         self.qr_start_btn.setEnabled(True)
         self.qr_stop_btn.setEnabled(False)
+
+
+def _muted(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setProperty("role", "muted")
+    return lbl

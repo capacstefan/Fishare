@@ -19,7 +19,6 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
 from . import config, crypto_utils
-from .util import local_ip
 
 
 def _compute_peer_id() -> str:
@@ -50,8 +49,16 @@ class Peer:
         return f"{dot} {self.name}{mute}"
 
 
-# Backwards-compat alias (web_server.py imports this name historically).
-_local_ip = local_ip
+def _local_ip() -> str:
+    """Best-effort LAN IP address detection on Windows."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
 
 
 class PeerRegistry(QObject):
@@ -106,7 +113,7 @@ class PeerRegistry(QObject):
         }
 
     def _build_info(self, service_name: str | None = None) -> ServiceInfo:
-        ip = local_ip()
+        ip = _local_ip()
         return ServiceInfo(
             type_=config.SERVICE_TYPE,
             name=service_name or self._service_name(),
@@ -126,26 +133,52 @@ class PeerRegistry(QObject):
         self._zc.register_service(self._info, allow_name_change=True)
 
     def _reannounce_async(self) -> None:
-        """Refresh TXT record on a background thread (mutates in place; falls
-        back to unregister+register if Zeroconf rejects the in-place update)."""
-        if self._zc is None or self._info is None:
+        """Refresh our TXT record in place, on a background thread.
+
+        We update the *existing* ServiceInfo object's properties in-place
+        and call ``update_service`` with that same reference. Zeroconf
+        tracks registered services by object identity; passing a brand-new
+        ServiceInfo can silently fail after the first update.
+
+        If the in-place update fails for any reason, we fall back to a
+        full unregister → register cycle.
+        """
+        if self._zc is None:
             return
-        zc, info = self._zc, self._info
+        zc = self._zc
 
         def _do() -> None:
             with self._announce_lock:
-                info.properties = self._current_properties()
+                info = self._info
+                props = self._current_properties()
+
+                if info is None:
+                    # No existing registration — do a fresh register.
+                    new_info = self._build_info()
+                    try:
+                        zc.register_service(new_info, allow_name_change=True)
+                        self._info = new_info
+                    except Exception:
+                        pass
+                    return
+
+                # In-place update: mutate the existing ServiceInfo.
                 try:
+                    info.properties = props
                     zc.update_service(info)
                     return
                 except Exception:
                     pass
-                try: zc.unregister_service(info)
-                except Exception: pass
-                fresh = self._build_info(service_name=info.name)
+
+                # Fallback: full unregister → register cycle.
                 try:
-                    zc.register_service(fresh, allow_name_change=True)
-                    self._info = fresh
+                    zc.unregister_service(info)
+                except Exception:
+                    pass
+                new_info = self._build_info(service_name=info.name)
+                try:
+                    zc.register_service(new_info, allow_name_change=True)
+                    self._info = new_info
                 except Exception:
                     pass
 

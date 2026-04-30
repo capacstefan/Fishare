@@ -1,7 +1,6 @@
-"""Tiny shared helpers — no GUI/network deps."""
+"""Tiny shared helpers — no dependencies on GUI/network."""
 from __future__ import annotations
 
-import socket
 from pathlib import Path
 
 
@@ -26,15 +25,3 @@ def unique_path(path: Path) -> Path:
         if not cand.exists():
             return cand
         i += 1
-
-
-def local_ip() -> str:
-    """Best-effort LAN IPv4 address. Falls back to 127.0.0.1."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-    finally:
-        s.close()

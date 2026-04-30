@@ -8,18 +8,17 @@ from typing import Any
 
 from . import config
 
-_lock = threading.RLock()
+_lock = threading.Lock()
 
 
 def _load(path: Path, default: Any) -> Any:
-    with _lock:
-        if not path.exists():
-            return default
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return default
+    if not path.exists():
+        return default
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return default
 
 
 def _save(path: Path, data: Any) -> None:
@@ -28,15 +27,6 @@ def _save(path: Path, data: Any) -> None:
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         tmp.replace(path)
-
-
-# Append helpers must hold the lock across load+save to avoid lost updates
-# when two background threads complete transfers simultaneously.
-def _append(path: Path, entry: Any) -> None:
-    with _lock:
-        data = _load(path, [])
-        data.append(entry)
-        _save(path, data)
 
 
 # ---------- Settings ----------
@@ -59,7 +49,9 @@ def load_history() -> list[dict]:
 
 
 def append_history(entry: dict) -> None:
-    _append(config.HISTORY_FILE, entry)
+    data = load_history()
+    data.append(entry)
+    _save(config.HISTORY_FILE, data)
 
 
 def clear_history() -> None:
@@ -72,7 +64,9 @@ def load_quicktexts() -> list[dict]:
 
 
 def append_quicktext(entry: dict) -> None:
-    _append(config.QUICKTEXTS_FILE, entry)
+    data = load_quicktexts()
+    data.append(entry)
+    _save(config.QUICKTEXTS_FILE, data)
 
 
 def save_quicktexts(items: list[dict]) -> None:

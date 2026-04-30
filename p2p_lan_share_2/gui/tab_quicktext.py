@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -16,7 +17,26 @@ from PyQt6.QtWidgets import (
 
 from .dialogs import QuickTextEditor, QuickTextReader
 from .peer_list import PeerList
-from ._widgets import confirm as _confirm, h2 as _h2, muted as _muted
+
+
+def _h2(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setProperty("role", "h2")
+    return lbl
+
+
+def _muted(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setProperty("role", "muted")
+    return lbl
+
+
+def _confirm(parent, title: str, msg: str) -> bool:
+    return QMessageBox.question(
+        parent, title, msg,
+        QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+        QMessageBox.StandardButton.Cancel,
+    ) == QMessageBox.StandardButton.Ok
 
 
 class QuickTextTab(QWidget):
