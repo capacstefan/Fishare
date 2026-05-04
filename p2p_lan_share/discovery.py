@@ -10,8 +10,10 @@ PeerRegistry emits Qt signals so the GUI updates live.
 from __future__ import annotations
 
 import hashlib
+import logging
 import socket
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,6 +22,13 @@ from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
 from . import config, crypto_utils
 from .util import local_ip
+
+
+_log = logging.getLogger(__name__)
+
+# Periodic re-announce so peers refresh TXT records even if an update event is
+# missed on the network/OS stack.
+_ANNOUNCE_HEARTBEAT_SEC = 20
 
 
 def _compute_peer_id() -> str:
@@ -69,11 +78,18 @@ class PeerRegistry(QObject):
         # Stores peer_ids (cert fingerprints), not names.
         self._muted: set[str] = set(muted or ())
         self.peers: dict[str, Peer] = {}  # peer_id -> Peer
+        self._svc_to_pid: dict[str, str] = {}  # zeroconf service name -> peer_id
 
         self._zc: Zeroconf | None = None
         self._info: ServiceInfo | None = None
         self._browser: ServiceBrowser | None = None
         self._announce_lock = threading.Lock()
+
+        # Serialize all announce operations through one thread to avoid
+        # overlapping update/unregister/register calls.
+        self._announce_stop = threading.Event()
+        self._announce_wakeup = threading.Event()
+        self._announce_thread: threading.Thread | None = None
 
     # ---------- lifecycle ----------
     def start(self) -> None:
@@ -81,9 +97,15 @@ class PeerRegistry(QObject):
         self._register()
         self._browser = ServiceBrowser(self._zc, config.SERVICE_TYPE, handlers=[self._on_change])
 
+        self._announce_stop.clear()
+        self._announce_thread = threading.Thread(target=self._announce_loop, daemon=True)
+        self._announce_thread.start()
+
     def stop(self) -> None:
         if self._zc is None:
             return
+        self._announce_stop.set()
+        self._announce_wakeup.set()
         try:
             if self._info is not None:
                 self._zc.unregister_service(self._info)
@@ -105,6 +127,9 @@ class PeerRegistry(QObject):
             b"name": self.device_name.encode("utf-8"),
             b"status": (b"online" if self.online else b"offline"),
             b"id": self.peer_id.encode("ascii"),
+            # Monotonic refresh marker (helps peers detect changes even when
+            # values briefly repeat; also enables future 'last seen' logic).
+            b"ts": str(int(time.time())).encode("ascii"),
         }
 
     def _build_info(self, service_name: str | None = None) -> ServiceInfo:
@@ -127,49 +152,62 @@ class PeerRegistry(QObject):
         self._info = self._build_info()
         self._zc.register_service(self._info, allow_name_change=True)
 
-    def _reannounce_async(self) -> None:
-        """Refresh TXT record on a background thread.
+    def _request_announce(self) -> None:
+        """Wake the announce loop to publish updated TXT properties."""
+        self._announce_wakeup.set()
 
-        Newer versions of `zeroconf` expose `ServiceInfo.properties` as a
-        read-only attribute, so we rebuild a fresh `ServiceInfo` with updated
-        TXT properties and call `update_service()`.
+    def _announce_loop(self) -> None:
+        """Publish TXT updates reliably.
+
+        We periodically refresh our service info (heartbeat) and also wake up
+        immediately when the user toggles Online/Offline or edits device name.
         """
+        while not self._announce_stop.is_set():
+            # Wake on explicit request or heartbeat.
+            self._announce_wakeup.wait(timeout=_ANNOUNCE_HEARTBEAT_SEC)
+            self._announce_wakeup.clear()
+            if self._announce_stop.is_set():
+                return
+            try:
+                self._announce_once()
+            except Exception as e:
+                _log.debug("announce failed: %s", e)
+
+    def _announce_once(self) -> None:
         if self._zc is None or self._info is None:
             return
+        with self._announce_lock:
+            if self._zc is None or self._info is None:
+                return
 
-        def _do() -> None:
-            with self._announce_lock:
-                if self._zc is None or self._info is None:
-                    return
-
-                zc = self._zc
-                info = self._info
-                fresh = self._build_info(service_name=info.name)
-                try:
-                    zc.update_service(fresh)
-                    self._info = fresh
-                    return
-                except Exception:
-                    pass
-                try:
-                    zc.unregister_service(info)
-                except Exception:
-                    pass
-                try:
-                    zc.register_service(fresh, allow_name_change=True)
-                    self._info = fresh
-                except Exception:
-                    pass
-
-        threading.Thread(target=_do, daemon=True).start()
+            zc = self._zc
+            info = self._info
+            fresh = self._build_info(service_name=info.name)
+            try:
+                zc.update_service(fresh)
+                self._info = fresh
+                return
+            except Exception as e:
+                # Some platforms/stacks are flaky about TXT-only updates.
+                # Fall back to a full unregister+register with the same name.
+                _log.debug("update_service failed; falling back to re-register: %s", e)
+            try:
+                zc.unregister_service(info)
+            except Exception:
+                pass
+            try:
+                zc.register_service(fresh, allow_name_change=True)
+                self._info = fresh
+            except Exception as e:
+                _log.debug("re-register failed: %s", e)
 
     def set_device_name(self, name: str) -> None:
         self.device_name = name or config.default_device_name()
-        self._reannounce_async()
+        self._request_announce()
 
     def set_online(self, online: bool) -> None:
         self.online = online
-        self._reannounce_async()
+        self._request_announce()
 
     # ---------- muting (by peer_id / fingerprint) ----------
     def toggle_mute(self, peer_id: str) -> bool:
@@ -195,8 +233,9 @@ class PeerRegistry(QObject):
     def _on_change(self, zeroconf: Zeroconf, service_type: str, name: str, state_change) -> None:
         from zeroconf import ServiceStateChange
         if state_change == ServiceStateChange.Removed:
-            # find by service name
-            pid = self._pid_from_service(name)
+            # Robust: service names may be auto-renamed; use mapping learned
+            # from TXT records instead of parsing the name.
+            pid = self._svc_to_pid.pop(name, None)
             if pid and pid in self.peers:
                 del self.peers[pid]
                 self.peer_removed.emit(pid)
@@ -209,6 +248,10 @@ class PeerRegistry(QObject):
         pid = (props.get(b"id") or b"").decode("ascii", "ignore")
         if not pid or pid == self.peer_id:
             return  # skip self
+
+        # Remember which service name maps to this peer_id so we can handle
+        # ServiceStateChange.Removed reliably.
+        self._svc_to_pid[name] = pid
 
         pname = (props.get(b"name") or b"").decode("utf-8", "ignore") or name
         status_raw = (props.get(b"status") or b"online").decode("ascii", "ignore").strip().lower()
@@ -230,13 +273,6 @@ class PeerRegistry(QObject):
             self.peer_added.emit(peer)
         else:
             self.peer_updated.emit(peer)
-
-    def _pid_from_service(self, service_name: str) -> str | None:
-        # Our service names end with "-<pid>.<service_type>"
-        head = service_name.split(".")[0]
-        if "-" in head:
-            return head.rsplit("-", 1)[-1]
-        return None
 
     # ---------- lookup helpers ----------
     def find_by_name(self, name: str) -> Peer | None:
