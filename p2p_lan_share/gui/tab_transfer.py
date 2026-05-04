@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 from .peer_list import PeerList
 from .theme import ToggleSwitch
 from ._widgets import h2 as _h2, muted as _muted
+from .. import config
 from ..util import fmt_size
 
 
@@ -95,6 +96,14 @@ class TransferTab(QWidget):
         )
         hrow.addWidget(_muted("Device"))
         hrow.addWidget(self.name_edit)
+
+        self.reset_name_btn = QPushButton("⟳")
+        self.reset_name_btn.setProperty("role", "icon")
+        self.reset_name_btn.setToolTip("Reset device name to default")
+        self.reset_name_btn.setFixedSize(40, 40)
+        self.reset_name_btn.clicked.connect(self._reset_device_name)
+        hrow.addWidget(self.reset_name_btn)
+
         hrow.addStretch(1)
 
         self.online_toggle = ToggleSwitch(on_text="Online", off_text="Offline")
@@ -223,6 +232,13 @@ class TransferTab(QWidget):
 
         progress_card.setMaximumHeight(150)
         root.addWidget(progress_card)
+
+    def _reset_device_name(self) -> None:
+        name = config.default_device_name()
+        self.name_edit.setText(name)
+        self.name_edit.setFocus()
+        self.name_edit.selectAll()
+        self.device_name_changed.emit(name)
 
     # ---- peer list ----
     def upsert_peer(self, peer) -> None:

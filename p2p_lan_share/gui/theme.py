@@ -154,6 +154,17 @@ QPushButton {{
     font-weight: 500;
     color: {TEXT};
 }}
+
+/* Small square icon button (e.g. refresh/reset) */
+QPushButton[role="icon"] {{
+    padding: 0px;
+    min-width: 40px;
+    min-height: 40px;
+    max-width: 40px;
+    max-height: 40px;
+    font-size: 14pt;
+    font-weight: 600;
+}}
 QPushButton:hover {{
     background: #fafafa;
     border-color: #d6d8dc;
