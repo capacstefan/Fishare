@@ -49,7 +49,7 @@ QStatusBar {{
     background: transparent;
     color: {MUTED};
     padding: 4px 10px;
-    font-size: 11pt;
+    font-size: 13pt;
 }}
 
 /* -------- Tabs -------- */
@@ -65,7 +65,7 @@ QTabBar::tab {{
     background: transparent;
     padding: 10px 22px;
     margin-right: 4px;
-    font-size: 12pt;
+    font-size: 14pt;
     color: {MUTED};
     border: none;
     border-radius: 8px;
@@ -84,9 +84,9 @@ QGroupBox {{
     background: {SURFACE};
     border: 1px solid {BORDER};
     border-radius: 14px;
-    margin-top: 18px;
+    margin-top: 20px;
     padding: 18px;
-    font-size: 12pt;
+    font-size: 13pt;
     font-weight: 600;
 }}
 QGroupBox::title {{
@@ -106,7 +106,7 @@ QFrame#card {{
 
 /* -------- Labels -------- */
 QLabel {{
-    font-size: 11pt;
+    font-size: 12pt;
     background: transparent;
 }}
 QLabel[role="h1"] {{
@@ -115,16 +115,16 @@ QLabel[role="h1"] {{
     color: {TEXT};
 }}
 QLabel[role="h2"] {{
-    font-size: 13pt;
+    font-size: 14pt;
     font-weight: 600;
     color: {TEXT};
 }}
 QLabel[role="muted"] {{
     color: {MUTED};
-    font-size: 10pt;
+    font-size: 12pt;
 }}
 QLabel[role="pin"] {{
-    font-size: 14pt;
+    font-size: 15pt;
     font-weight: 700;
     color: {WARN};
     letter-spacing: 3px;
@@ -136,7 +136,7 @@ QLineEdit, QPlainTextEdit, QTextEdit {{
     border: 1px solid {BORDER};
     border-radius: 10px;
     padding: 8px 12px;
-    font-size: 11pt;
+    font-size: 12pt;
     selection-background-color: {ACCENT};
     selection-color: white;
 }}
@@ -150,7 +150,7 @@ QPushButton {{
     border: 1px solid {BORDER};
     border-radius: 10px;
     padding: 9px 18px;
-    font-size: 11pt;
+    font-size: 12pt;
     font-weight: 500;
     color: {TEXT};
 }}
@@ -197,7 +197,7 @@ QListWidget, QTableWidget {{
     border: 1px solid {BORDER};
     border-radius: 12px;
     padding: 6px;
-    font-size: 11pt;
+    font-size: 12pt;
     outline: 0;
 }}
 QListWidget::item {{
@@ -234,12 +234,12 @@ QHeaderView::section {{
     border-bottom: 1px solid {BORDER};
     font-weight: 600;
     color: {MUTED};
-    font-size: 10pt;
+    font-size: 11pt;
 }}
 
 /* -------- CheckBox (for PIN Lock) -------- */
 QCheckBox {{
-    font-size: 11pt;
+    font-size: 12pt;
     spacing: 8px;
 }}
 QCheckBox::indicator {{
@@ -317,6 +317,7 @@ QMenu {{
     border: 1px solid {BORDER};
     border-radius: 10px;
     padding: 6px;
+    font-size: 12pt;
 }}
 QMenu::item {{
     padding: 8px 18px;
@@ -330,7 +331,7 @@ QMenu::item:selected {{
 
 def apply_theme(app) -> None:
     """Apply global font + stylesheet."""
-    font = QFont("Segoe UI Variable", 10)
+    font = QFont("Segoe UI Variable", 11)
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(font)
     app.setStyleSheet(STYLESHEET)
@@ -363,7 +364,7 @@ class ToggleSwitch(QAbstractButton):
         super().__init__(parent)
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(QSize(150, 34))
+        self.setFixedSize(QSize(170, 40))
 
         self._on_text = on_text
         self._off_text = off_text
@@ -381,7 +382,7 @@ class ToggleSwitch(QAbstractButton):
         self.toggled.connect(self.toggled_changed.emit)
 
     def sizeHint(self) -> QSize:
-        return QSize(150, 34)
+        return QSize(170, 40)
 
     # ---- animated progress (the one thing that moves) ----
     def _get_progress(self) -> float:
@@ -425,7 +426,7 @@ class ToggleSwitch(QAbstractButton):
         # Label: show the label that corresponds to the dominant side
         p.setPen(QColor("white"))
         font = self.font()
-        font.setPointSize(10)
+        font.setPointSize(12)
         font.setBold(True)
         p.setFont(font)
         on_side = t >= 0.5

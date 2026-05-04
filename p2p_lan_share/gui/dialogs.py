@@ -58,7 +58,7 @@ class AcceptOfferDialog(QDialog):
             self.pin_edit = QLineEdit(self)
             self.pin_edit.setMaxLength(8)
             self.pin_edit.setPlaceholderText("PIN")
-            self.pin_edit.setMinimumHeight(36)
+            self.pin_edit.setMinimumHeight(40)
             v.addWidget(self.pin_edit)
 
         btns = QDialogButtonBox(

@@ -91,6 +91,8 @@ class PeerRegistry(QObject):
             pass
         self._zc.close()
         self._zc = None
+        self._info = None
+        self._browser = None
 
     # ---------- self advertisement ----------
     def _service_name(self) -> str:
@@ -126,23 +128,33 @@ class PeerRegistry(QObject):
         self._zc.register_service(self._info, allow_name_change=True)
 
     def _reannounce_async(self) -> None:
-        """Refresh TXT record on a background thread (mutates in place; falls
-        back to unregister+register if Zeroconf rejects the in-place update)."""
+        """Refresh TXT record on a background thread.
+
+        Newer versions of `zeroconf` expose `ServiceInfo.properties` as a
+        read-only attribute, so we rebuild a fresh `ServiceInfo` with updated
+        TXT properties and call `update_service()`.
+        """
         if self._zc is None or self._info is None:
             return
-        zc, info = self._zc, self._info
 
         def _do() -> None:
             with self._announce_lock:
-                info.properties = self._current_properties()
+                if self._zc is None or self._info is None:
+                    return
+
+                zc = self._zc
+                info = self._info
+                fresh = self._build_info(service_name=info.name)
                 try:
-                    zc.update_service(info)
+                    zc.update_service(fresh)
+                    self._info = fresh
                     return
                 except Exception:
                     pass
-                try: zc.unregister_service(info)
-                except Exception: pass
-                fresh = self._build_info(service_name=info.name)
+                try:
+                    zc.unregister_service(info)
+                except Exception:
+                    pass
                 try:
                     zc.register_service(fresh, allow_name_change=True)
                     self._info = fresh

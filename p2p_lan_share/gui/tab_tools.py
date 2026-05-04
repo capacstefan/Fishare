@@ -62,8 +62,8 @@ class ToolsTab(QWidget):
         self.stop_btn = QPushButton("Cancel Sync")
         self.stop_btn.setProperty("role", "danger")
         self.stop_btn.setEnabled(False)
-        self.start_btn.setMinimumHeight(38)
-        self.stop_btn.setMinimumHeight(38)
+        self.start_btn.setMinimumHeight(42)
+        self.stop_btn.setMinimumHeight(42)
         self.start_btn.clicked.connect(self._start_sync)
         self.stop_btn.clicked.connect(self.sync_stop_requested.emit)
         btns.addWidget(self.start_btn)
@@ -90,7 +90,7 @@ class ToolsTab(QWidget):
             "border-radius: 12px;"
             "background: #fafafa;"
             "color: #8a8a8f;"
-            "font-size: 12pt;"
+            "font-size: 13pt;"
         )
         qv.addWidget(self.qr_label, 1)
 
@@ -107,8 +107,8 @@ class ToolsTab(QWidget):
         self.qr_stop_btn = QPushButton("Cancel Server")
         self.qr_stop_btn.setProperty("role", "danger")
         self.qr_stop_btn.setEnabled(False)
-        self.qr_start_btn.setMinimumHeight(38)
-        self.qr_stop_btn.setMinimumHeight(38)
+        self.qr_start_btn.setMinimumHeight(42)
+        self.qr_stop_btn.setMinimumHeight(42)
         self.qr_start_btn.clicked.connect(self.qr_start_requested.emit)
         self.qr_stop_btn.clicked.connect(self.qr_stop_requested.emit)
         qr_btns.addWidget(self.qr_start_btn)

@@ -46,7 +46,7 @@ class TransferProgressRow(QWidget):
         self.label.setProperty("role", "muted")
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
-        self.bar.setMaximumHeight(10)
+        self.bar.setMaximumHeight(12)
         self.bar.setTextVisible(False)
         v.addWidget(self.label)
         v.addWidget(self.bar)
@@ -89,7 +89,7 @@ class TransferTab(QWidget):
         self.name_edit = QLineEdit(settings["device_name"])
         self.name_edit.setMinimumWidth(260)
         self.name_edit.setMaximumWidth(420)
-        self.name_edit.setMinimumHeight(36)
+        self.name_edit.setMinimumHeight(40)
         self.name_edit.editingFinished.connect(
             lambda: self.device_name_changed.emit(self.name_edit.text().strip())
         )
@@ -194,7 +194,7 @@ class TransferTab(QWidget):
         self.send_btn = QPushButton("Send")
         self.send_btn.setProperty("role", "primary")
         self.send_btn.setMinimumWidth(140)
-        self.send_btn.setMinimumHeight(38)
+        self.send_btn.setMinimumHeight(42)
         self.send_btn.clicked.connect(self._on_send)
         arow.addWidget(self.send_btn)
 

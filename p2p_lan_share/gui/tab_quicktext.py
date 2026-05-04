@@ -75,7 +75,7 @@ class QuickTextTab(QWidget):
 
         write_btn = QPushButton("Write Quick Text")
         write_btn.setProperty("role", "primary")
-        write_btn.setMinimumHeight(38)
+        write_btn.setMinimumHeight(42)
         write_btn.clicked.connect(self._write)
         pv.addWidget(write_btn)
 
