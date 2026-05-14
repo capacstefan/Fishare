@@ -1,4 +1,4 @@
-"""Main application window: wires tabs, discovery, network, sync, web server."""
+"""Main window: builds tabs, owns services, routes signals."""
 from __future__ import annotations
 
 import datetime as _dt
@@ -6,13 +6,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import pyqtSlot
 from PyQt6.QtWidgets import (
-    QFileDialog,
-    QMainWindow,
-    QMessageBox,
-    QStatusBar,
-    QTabWidget,
-    QVBoxLayout,
-    QWidget,
+    QFileDialog, QMainWindow, QMessageBox, QStatusBar, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from .. import config, storage
@@ -41,28 +36,27 @@ class MainWindow(QMainWindow):
         self.resize(1200, 780)
         self.setMinimumSize(980, 640)
 
-        self.registry = PeerRegistry(
-            self.settings["device_name"], bool(self.settings["online"]), self._muted
-        )
-        self.server = TransferServer(self._get_server_state)
+        # Services
+        self.registry = PeerRegistry(self.settings["device_name"],
+                                     bool(self.settings["online"]), self._muted)
+        self.server = TransferServer(self._server_state)
         self.queue = TransferQueue()
         self.qr_server: QrWebServer | None = None
         self.sync_sender: SyncSender | None = None
         self.sync_receiver: SyncReceiver | None = None
         self._live_tasks: list = []
 
-        # ---- layout ----
-        central = QWidget(self)
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(24, 20, 24, 16)
-        layout.setSpacing(14)
-
-        self.tabs = QTabWidget(self)
-        self.tabs.setDocumentMode(True)
+        # Tabs
         self.tab_transfer = TransferTab(self.settings)
         self.tab_text = QuickTextTab()
         self.tab_tools = ToolsTab()
         self.tab_history = HistoryTab(clear_cb=storage.clear_history)
+
+        central = QWidget(self)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(24, 20, 24, 16); layout.setSpacing(14)
+
+        self.tabs = QTabWidget(self); self.tabs.setDocumentMode(True)
         for w, label in (
             (self.tab_transfer, "File Transfer"),
             (self.tab_text, "Quick Text"),
@@ -79,45 +73,47 @@ class MainWindow(QMainWindow):
         self.tab_history.load(storage.load_history())
         self.tab_text.load_inbox(storage.load_quicktexts())
 
-        self._connect_signals()
+        self._wire_signals()
         self.registry.start()
         self.server.start()
 
-    # ---------- signal wiring ----------
-    def _connect_signals(self) -> None:
-        r, s, tt, txt, tools = (
-            self.registry, self.server,
-            self.tab_transfer, self.tab_text, self.tab_tools,
-        )
+    # =================================================================
+    # Setup helpers
+    # =================================================================
+    def _wire_signals(self) -> None:
+        r, s = self.registry, self.server
+        tt, tx, tl = self.tab_transfer, self.tab_text, self.tab_tools
 
-        r.peer_added.connect(self._on_peer_added)
-        r.peer_updated.connect(self._on_peer_updated)
-        r.peer_removed.connect(self._on_peer_removed)
+        r.peer_added.connect(self._peer_changed)
+        r.peer_updated.connect(self._peer_changed)
+        r.peer_removed.connect(self._peer_removed)
 
-        tt.device_name_changed.connect(self._on_device_name_changed)
-        tt.online_toggled.connect(self._on_online_toggled)
+        tt.device_name_changed.connect(self._on_device_name)
+        tt.online_toggled.connect(self._on_online)
         tt.choose_download_dir.connect(self._pick_download_dir)
-        tt.send_requested.connect(self._on_send_files)
-        tt.mute_toggled.connect(self._on_toggle_mute)
+        tt.send_requested.connect(self._send_files)
+        tt.mute_toggled.connect(self._toggle_mute)
 
-        txt.send_text_requested.connect(self._on_send_text)
-        txt.mute_toggled.connect(self._on_toggle_mute)
-        txt.inbox_changed.connect(storage.save_quicktexts)
+        tx.send_text_requested.connect(self._send_text)
+        tx.mute_toggled.connect(self._toggle_mute)
+        tx.inbox_changed.connect(storage.save_quicktexts)
 
-        tools.sync_start_requested.connect(self._on_sync_start)
-        tools.sync_stop_requested.connect(self._on_sync_stop)
-        tools.qr_start_requested.connect(self._on_qr_start)
-        tools.qr_stop_requested.connect(self._on_qr_stop)
+        tl.sync_start_requested.connect(self._sync_start)
+        tl.sync_stop_requested.connect(self._sync_stop)
+        tl.qr_start_requested.connect(self._qr_start)
+        tl.qr_stop_requested.connect(self._qr_stop)
 
-        s.offer_received.connect(self._on_offer_received)
-        s.file_progress.connect(self._on_recv_file_progress)
+        s.offer_received.connect(self._on_offer)
+        s.file_progress.connect(self._on_recv_progress)
         s.transfer_completed.connect(self._on_recv_completed)
         s.recv_failed.connect(tt.on_recv_failed)
         s.text_received.connect(self._on_text_received)
         s.sync_started.connect(self._on_incoming_sync)
         s.log.connect(lambda m: self.statusBar().showMessage(m, 4000))
 
-    # ---------- state ----------
+    # =================================================================
+    # State / status bar
+    # =================================================================
     def _refresh_status(self) -> None:
         s = self.settings
         self.statusBar().showMessage(
@@ -126,7 +122,7 @@ class MainWindow(QMainWindow):
             f"Downloads: {s['download_dir']}"
         )
 
-    def _get_server_state(self) -> dict:
+    def _server_state(self) -> dict:
         return {
             "online": bool(self.settings["online"]),
             "muted": set(self._muted),
@@ -134,38 +130,34 @@ class MainWindow(QMainWindow):
         }
 
     def notify(self, text: str) -> None:
-        # Use the existing status bar for transient messages — same UX, no
-        # custom fade widget needed.
         self.statusBar().showMessage(text, 2500)
 
-    # ---------- peer events ----------
+    # =================================================================
+    # Peer events
+    # =================================================================
     @pyqtSlot(object)
-    def _on_peer_added(self, peer) -> None:
-        for tab in (self.tab_transfer, self.tab_text, self.tab_tools):
-            tab.upsert_peer(peer)
-
-    @pyqtSlot(object)
-    def _on_peer_updated(self, peer) -> None:
+    def _peer_changed(self, peer) -> None:
         for tab in (self.tab_transfer, self.tab_text, self.tab_tools):
             tab.upsert_peer(peer)
         if peer.status == "offline":
             self.tab_transfer.remove_offline_selected(peer.peer_id)
 
     @pyqtSlot(str)
-    def _on_peer_removed(self, peer_id: str) -> None:
+    def _peer_removed(self, peer_id: str) -> None:
         for tab in (self.tab_transfer, self.tab_text, self.tab_tools):
             tab.remove_peer(peer_id)
 
-    # ---------- settings handlers ----------
-    def _on_device_name_changed(self, name: str) -> None:
+    # =================================================================
+    # Settings handlers
+    # =================================================================
+    def _on_device_name(self, name: str) -> None:
         name = name or config.default_device_name()
         self.settings["device_name"] = name
         storage.save_settings(self.settings)
         self._refresh_status()
         self.registry.set_device_name(name)
 
-    def _on_online_toggled(self, online: bool) -> None:
-        # UI updates instantly; mDNS re-announce runs on a background thread.
+    def _on_online(self, online: bool) -> None:
         self.settings["online"] = bool(online)
         storage.save_settings(self.settings)
         self._refresh_status()
@@ -181,35 +173,33 @@ class MainWindow(QMainWindow):
             storage.save_settings(self.settings)
             self._refresh_status()
 
-    def _on_toggle_mute(self, peer_id: str) -> None:
+    def _toggle_mute(self, peer_id: str) -> None:
         peer = self.registry.peers.get(peer_id)
-        display = peer.name if peer else peer_id
+        label = peer.name if peer else peer_id
         now_muted = self.registry.toggle_mute(peer_id)
         self._muted = self.registry.muted
         storage.save_muted(self._muted)
-        self.notify(f"{'Muted' if now_muted else 'Unmuted'} {display}")
+        self.notify(f"{'Muted' if now_muted else 'Unmuted'} {label}")
 
-    # ---------- task helpers ----------
-    def _submit_task(self, task: TransferTask) -> None:
-        self._live_tasks.append(task)
-        task.finished.connect(
-            lambda *a, t=task: (self._live_tasks.remove(t) if t in self._live_tasks else None)
-        )
-        self.queue.submit(task)
-
+    # =================================================================
+    # Sending
+    # =================================================================
     def _new_task(self, peer, kind: str, **kwargs) -> TransferTask:
         return TransferTask(
-            peer_name=peer.name,
-            peer_addr=peer.address,
-            peer_port=peer.port,
+            peer_name=peer.name, peer_addr=peer.address, peer_port=peer.port,
             kind=kind,
-            from_name=self.settings["device_name"],
-            from_id=self.registry.peer_id,
+            from_name=self.settings["device_name"], from_id=self.registry.peer_id,
             **kwargs,
         )
 
-    # ---------- send files ----------
-    def _on_send_files(self, peer_names: list, file_paths: list, pin: str) -> None:
+    def _submit(self, task: TransferTask) -> None:
+        self._live_tasks.append(task)
+        task.finished.connect(
+            lambda *_a, t=task: self._live_tasks.remove(t) if t in self._live_tasks else None
+        )
+        self.queue.submit(task)
+
+    def _send_files(self, peer_names: list, file_paths: list, pin: str) -> None:
         specs: list[FileSpec] = []
         for p in file_paths:
             pth = Path(p)
@@ -219,7 +209,8 @@ class MainWindow(QMainWindow):
             if size > config.MAX_FILE_SIZE:
                 QMessageBox.warning(
                     self, "File too large",
-                    f"{pth.name} exceeds the {config.MAX_FILE_SIZE // (1024**3)} GB limit and will be skipped.",
+                    f"{pth.name} exceeds the {config.MAX_FILE_SIZE // (1024**3)} GB limit "
+                    "and will be skipped.",
                 )
                 continue
             specs.append(FileSpec(path=str(pth), size=size))
@@ -227,8 +218,7 @@ class MainWindow(QMainWindow):
             return
 
         total = sum(s.size for s in specs)
-        offline: list[str] = []
-        sent = 0
+        offline, sent = [], 0
         for name in peer_names:
             peer = self.registry.find_by_name(name)
             if peer is None or peer.status != "online":
@@ -240,24 +230,15 @@ class MainWindow(QMainWindow):
             task.status.connect(self.tab_transfer.on_task_status)
             task.finished.connect(
                 lambda peer_name, ok, reason, tot=total, cnt=len(specs):
-                    self._on_send_finished(peer_name, ok, reason, "File", tot, cnt)
+                    self._on_send_done(peer_name, ok, reason, "File", tot, cnt)
             )
-            self._submit_task(task)
+            self._submit(task)
             sent += 1
 
-        if offline and sent:
-            names = ", ".join(offline)
-            self.notify(f"Sending to {sent} peer{'s' if sent > 1 else ''} · {names} offline")
-        elif offline:
-            names = ", ".join(offline)
-            self.notify(f"Peer{'s' if len(offline) > 1 else ''} ({names}) {'are' if len(offline) > 1 else 'is'} offline")
-        elif sent:
-            self.notify(f"Sending to {sent} peer(s)…")
+        self._report_send(sent, offline, "Sending")
 
-    # ---------- send text ----------
-    def _on_send_text(self, peer_names: list, text: str) -> None:
-        sent = 0
-        offline: list[str] = []
+    def _send_text(self, peer_names: list, text: str) -> None:
+        offline, sent = [], 0
         for name in peer_names:
             peer = self.registry.find_by_name(name)
             if peer is None or peer.status != "online":
@@ -266,56 +247,58 @@ class MainWindow(QMainWindow):
             task = self._new_task(peer, "text", text=text)
             task.finished.connect(
                 lambda peer_name, ok, reason:
-                    self._on_send_finished(peer_name, ok, reason, "QuickText", 0, 0)
+                    self._on_send_done(peer_name, ok, reason, "QuickText", 0, 0)
             )
-            self._submit_task(task)
+            self._submit(task)
             sent += 1
+        self._report_send(sent, offline, "Quick text sent")
+
+    def _report_send(self, sent: int, offline: list[str], verb: str) -> None:
         if offline and sent:
-            names = ", ".join(offline)
-            self.notify(f"Quick text sent to {sent} peer{'s' if sent > 1 else ''} · {names} offline")
+            self.notify(f"{verb} to {sent} peer{'s' if sent > 1 else ''} · {', '.join(offline)} offline")
         elif offline:
-            names = ", ".join(offline)
-            self.notify(f"Peer{'s' if len(offline) > 1 else ''} ({names}) {'are' if len(offline) > 1 else 'is'} offline")
+            plural = "s" if len(offline) > 1 else ""
+            verb2 = "are" if len(offline) > 1 else "is"
+            self.notify(f"Peer{plural} ({', '.join(offline)}) {verb2} offline")
         elif sent:
-            self.notify(f"Quick text sent to {sent} peer(s)")
+            self.notify(f"{verb} to {sent} peer(s)…")
 
-    def _on_send_finished(self, peer_name, ok, reason, kind, size, count) -> None:
-        if ok:
-            entry = {
-                "date": _now(),
-                "size": size if kind == "File" else 0,
-                "count": count if kind == "File" else 0,
-                "direction": "Sent",
-                "peer": peer_name,
-                "type": kind,
-            }
-            storage.append_history(entry)
-            self.tab_history.append(entry)
-            self.notify(f"Sent to {peer_name}")
-        else:
+    def _on_send_done(self, peer_name, ok, reason, kind, size, count) -> None:
+        if not ok:
             self.notify(f"Failed to {peer_name}: {reason}")
-
-    # ---------- receive ----------
-    @pyqtSlot(object)
-    def _on_offer_received(self, offer) -> None:
-        if not self.settings["online"] or offer.sender_id in self._muted:
-            offer.respond(False)
             return
-        # Impersonation warning: same display name, different cert fingerprint.
+        entry = {
+            "date": _now(),
+            "size": size if kind == "File" else 0,
+            "count": count if kind == "File" else 0,
+            "direction": "Sent", "peer": peer_name, "type": kind,
+        }
+        storage.append_history(entry)
+        self.tab_history.append(entry)
+        self.notify(f"Sent to {peer_name}")
+
+    # =================================================================
+    # Receiving
+    # =================================================================
+    @pyqtSlot(object)
+    def _on_offer(self, offer) -> None:
+        if not self.settings["online"] or offer.sender_id in self._muted:
+            offer.respond(False); return
+        # Impersonation warning: same display name, different fingerprint.
         known_id = next(
             (p.peer_id for p in self.registry.peers.values() if p.name == offer.sender_name),
             None,
         )
         if known_id and offer.sender_id and known_id != offer.sender_id:
-            self.notify(f"⚠ Impersonation attempt: \u201c{offer.sender_name}\u201d (different fingerprint)")
+            self.notify(f"⚠ Impersonation attempt: \u201c{offer.sender_name}\u201d "
+                        "(different fingerprint)")
         dlg = AcceptOfferDialog(offer, self)
         ok = bool(dlg.exec())
         offer.respond(ok, dlg.pin() if ok else "")
         if ok:
             self.notify(f"Accepting from {offer.sender_name}…")
 
-    @pyqtSlot(str, str, int, int, float, str)
-    def _on_recv_file_progress(self, sender, filename, done, total, bps, eta) -> None:
+    def _on_recv_progress(self, sender, filename, done, total, bps, eta) -> None:
         self.tab_transfer.on_recv_progress(sender, filename, done, total, bps, eta)
         pct = int(done * 100 / total) if total else 0
         self.statusBar().showMessage(
@@ -323,7 +306,6 @@ class MainWindow(QMainWindow):
             1500,
         )
 
-    @pyqtSlot(str, list, int)
     def _on_recv_completed(self, sender, filenames, total_bytes) -> None:
         entry = {
             "date": _now(),
@@ -335,24 +317,25 @@ class MainWindow(QMainWindow):
         self.tab_transfer.on_recv_completed(sender)
         self.notify(f"Received {len(filenames)} file(s) from {sender}")
 
-    @pyqtSlot(str, str)
     def _on_text_received(self, sender, text) -> None:
         items = storage.load_quicktexts()
         items.append({"sender": sender, "text": text, "date": _now()})
         storage.save_quicktexts(items)
         self.tab_text.add_received(sender, text)
 
-        hist = {
+        entry = {
             "date": _now(),
             "size": 0, "count": 0,
             "direction": "Received", "peer": sender, "type": "QuickText",
         }
-        storage.append_history(hist)
-        self.tab_history.append(hist)
+        storage.append_history(entry)
+        self.tab_history.append(entry)
         self.notify(f"Quick text received from {sender}")
 
-    # ---------- folder sync ----------
-    def _on_sync_start(self, peer_name: str, folder: str) -> None:
+    # =================================================================
+    # Folder sync
+    # =================================================================
+    def _sync_start(self, peer_name: str, folder: str) -> None:
         if self.sync_sender is not None:
             QMessageBox.information(self, "Sync", "A sync is already running.")
             return
@@ -378,7 +361,7 @@ class MainWindow(QMainWindow):
         self.tab_tools.set_sync_running(True, "starting…")
         self.notify(f"Folder syncing to {peer_name}")
 
-    def _on_sync_stop(self) -> None:
+    def _sync_stop(self) -> None:
         if self.sync_sender:
             self.sync_sender.stop(notify=True)
         if self.sync_receiver:
@@ -390,6 +373,9 @@ class MainWindow(QMainWindow):
         self.notify("Sync stopped")
 
     def _on_incoming_sync(self, sender_name: str, folder: str, wire) -> None:
+        if self.sync_receiver is not None:
+            self.sync_receiver.stop(notify=True)
+            self.sync_receiver = None
         dest = QFileDialog.getExistingDirectory(
             self, f"Select destination for sync from {sender_name}",
             self.settings["download_dir"],
@@ -409,25 +395,27 @@ class MainWindow(QMainWindow):
         self.sync_receiver = None
         self.tab_tools.set_sync_running(False, f"stopped ({reason})")
 
-    # ---------- QR web server ----------
-    def _on_qr_start(self) -> None:
+    # =================================================================
+    # QR web server
+    # =================================================================
+    def _qr_start(self) -> None:
         if self.qr_server is not None:
             return
         self.qr_server = QrWebServer(self.settings["device_name"], self.settings["download_dir"])
         self.qr_server.started.connect(self.tab_tools.show_qr)
         self.qr_server.stopped.connect(self.tab_tools.hide_qr)
-        self.qr_server.file_received.connect(self._on_web_file_received)
+        self.qr_server.file_received.connect(self._on_web_file)
         self.qr_server.text_received.connect(self._on_text_received)
         self.qr_server.start()
         self.notify("QR web server running")
 
-    def _on_qr_stop(self) -> None:
+    def _qr_stop(self) -> None:
         if self.qr_server:
             self.qr_server.stop()
             self.qr_server = None
             self.notify("QR web server stopped")
 
-    def _on_web_file_received(self, filename: str, path: str, size: int) -> None:
+    def _on_web_file(self, filename: str, _path: str, size: int) -> None:
         entry = {
             "date": _now(),
             "size": size, "count": 1,
@@ -437,18 +425,16 @@ class MainWindow(QMainWindow):
         self.tab_history.append(entry)
         self.notify(f"Phone uploaded {filename}")
 
-    # ---------- shutdown ----------
+    # =================================================================
+    # Shutdown
+    # =================================================================
     def closeEvent(self, e) -> None:
         for fn in (self.server.stop, self.registry.stop):
-            try:
-                fn()
-            except Exception:
-                pass
+            try: fn()
+            except Exception: pass
         if self.qr_server:
-            try:
-                self.qr_server.stop()
-            except Exception:
-                pass
+            try: self.qr_server.stop()
+            except Exception: pass
         if self.sync_sender:
             self.sync_sender.stop(notify=False)
         if self.sync_receiver:

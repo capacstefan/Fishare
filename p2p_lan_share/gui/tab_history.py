@@ -1,18 +1,10 @@
-"""Tab 4: History table."""
+"""Tab 4: Transfer History table."""
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QAbstractItemView,
-    QFrame,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
+    QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLabel,
+    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..util import fmt_size
@@ -25,17 +17,12 @@ class HistoryTab(QWidget):
         super().__init__(parent)
         self._clear_cb = clear_cb
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(4, 4, 4, 4)
+        root = QVBoxLayout(self); root.setContentsMargins(4, 4, 4, 4)
 
-        card = QFrame()
-        card.setObjectName("card")
-        v = QVBoxLayout(card)
-        v.setContentsMargins(18, 16, 18, 16)
-        v.setSpacing(12)
+        card = QFrame(); card.setObjectName("card")
+        v = QVBoxLayout(card); v.setContentsMargins(18, 16, 18, 16); v.setSpacing(12)
 
-        title = QLabel("Transfer History")
-        title.setProperty("role", "h2")
+        title = QLabel("Transfer History"); title.setProperty("role", "h2")
         v.addWidget(title)
 
         self.table = QTableWidget(0, len(COLUMNS))
@@ -48,10 +35,8 @@ class HistoryTab(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(36)
         v.addWidget(self.table, 1)
 
-        row = QHBoxLayout()
-        row.addStretch(1)
-        clear_btn = QPushButton("Clear History")
-        clear_btn.setProperty("role", "danger")
+        row = QHBoxLayout(); row.addStretch(1)
+        clear_btn = QPushButton("Clear History"); clear_btn.setProperty("role", "danger")
         clear_btn.clicked.connect(self._on_clear)
         row.addWidget(clear_btn)
         v.addLayout(row)
@@ -60,20 +45,19 @@ class HistoryTab(QWidget):
 
     def load(self, entries: list[dict]) -> None:
         self.table.setRowCount(0)
-        # Newest first: storage appends chronologically, so reverse for display.
-        for e in reversed(entries):
+        for e in reversed(entries):  # newest first
             self.append(e, at_top=False)
 
     def append(self, entry: dict, at_top: bool = True) -> None:
         row = 0 if at_top else self.table.rowCount()
         self.table.insertRow(row)
         is_text = entry.get("type") == "QuickText"
-        size_val = entry.get("size", 0)
-        count_val = entry.get("count", 0)
+        size = entry.get("size", 0)
+        count = entry.get("count", 0)
         cells = [
             entry.get("date", ""),
-            "-" if is_text or size_val in ("-", 0, None) else fmt_size(size_val),
-            "-" if is_text or count_val in ("-", 0, None) else str(count_val),
+            "-" if is_text or not size else fmt_size(size),
+            "-" if is_text or not count else str(count),
             entry.get("direction", ""),
             entry.get("peer", ""),
             entry.get("type", ""),

@@ -1,8 +1,7 @@
-"""Reusable peer list widget shared by all tabs.
+"""Reusable peer list widget.
 
-Keeps the peer_id (stable cert fingerprint) in UserRole and the display
-name in UserRole+1, so other code can identify a peer regardless of
-its current label.
+Stores peer_id in UserRole and friendly name in UserRole+1 so peers can
+be identified regardless of their current label (status/mute emoji).
 """
 from __future__ import annotations
 
@@ -14,8 +13,6 @@ _NAME = Qt.ItemDataRole.UserRole + 1
 
 
 class PeerList(QListWidget):
-    """List of peers. Optional right-click → mute_requested(peer_id)."""
-
     mute_requested = pyqtSignal(str)
 
     def __init__(self, parent=None, *, mute_on_right_click: bool = False) -> None:
@@ -36,18 +33,11 @@ class PeerList(QListWidget):
         it.setData(_NAME, peer.name)
         self.addItem(it)
 
-    def remove(self, peer_id: str) -> bool:
+    def remove(self, peer_id: str) -> None:
         for i in range(self.count()):
             if self.item(i).data(_PID) == peer_id:
                 self.takeItem(i)
-                return True
-        return False
-
-    def find_row(self, peer_id: str) -> int:
-        for i in range(self.count()):
-            if self.item(i).data(_PID) == peer_id:
-                return i
-        return -1
+                return
 
     @staticmethod
     def pid_of(item: QListWidgetItem) -> str:

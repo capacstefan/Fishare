@@ -1,4 +1,4 @@
-"""Generate a self-signed TLS certificate on first run. Stored in %APPDATA%."""
+"""Generate a persistent self-signed TLS certificate on first run."""
 from __future__ import annotations
 
 import ipaddress
@@ -14,17 +14,16 @@ from . import config
 
 
 def ensure_cert() -> tuple[str, str]:
-    """Create cert/key if missing. Returns (cert_path, key_path)."""
+    """Return (cert_path, key_path). Generates them once if missing."""
     if config.CERT_FILE.exists() and config.KEY_FILE.exists():
         return str(config.CERT_FILE), str(config.KEY_FILE)
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     hostname = socket.gethostname()
-    subject = issuer = x509.Name([
+    name = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, hostname),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "P2P LAN Share"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, config.APP_NAME),
     ])
-
     san = [x509.DNSName(hostname), x509.DNSName("localhost")]
     try:
         san.append(x509.IPAddress(ipaddress.ip_address("127.0.0.1")))
@@ -34,8 +33,7 @@ def ensure_cert() -> tuple[str, str]:
     now = datetime.now(timezone.utc)
     cert = (
         x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
+        .subject_name(name).issuer_name(name)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - timedelta(days=1))
@@ -46,11 +44,9 @@ def ensure_cert() -> tuple[str, str]:
     )
 
     config.CERT_FILE.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    config.KEY_FILE.write_bytes(
-        key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-    )
+    config.KEY_FILE.write_bytes(key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    ))
     return str(config.CERT_FILE), str(config.KEY_FILE)

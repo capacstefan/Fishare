@@ -1,22 +1,9 @@
-"""TLS networking: transfer server, client, queue.
+"""TLS file/text transfer: server, sender task, outbound queue.
 
-All control + data uses the framed protocol in protocol.py.
-
-File transfer (after offer/response are exchanged):
-  S->R: J{"type":"file_begin","index":i,"name":...,"size":N}
-  S->R: D-frames totalling N bytes
-  S->R: J{"type":"file_end","index":i,"sha256":hex}
-  ...
-  S->R: J{"type":"all_done"}
-
-Receiver writes to <name>.part, verifies sha256 on file_end, then atomically
-renames to a unique final name. Mismatch deletes the .part and aborts.
-
-Bidirectional concurrency: each TransferTask opens its own TLS socket, and
-the server spawns one thread per inbound connection. Sending to peer X and
-receiving from peer X simultaneously is safe — they run on independent
-sockets and independent threads. UI rows are keyed by (direction, peer) so
-up/down rows never collide.
+Wire protocol (after offer/response accept):
+    files: file_begin → N data frames → file_end(sha256) → ... → all_done
+    text:  text_body
+    sync:  Wire is handed to sync.py
 """
 from __future__ import annotations
 
@@ -31,39 +18,18 @@ from typing import Callable
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from . import config, native
-from .protocol import (
-    FT_DATA, FT_JSON, MAX_FRAME, Wire, WireError,
-    client_ctx, open_offer, server_ctx, tune_sock,
-)
-from .util import unique_path
+from . import config, native, protocol
+from .protocol import FT_DATA, MAX_FRAME, Wire, WireError
+from .util import fmt_eta, unique_path
+
+_CHUNK = min(config.CHUNK, MAX_FRAME)
 
 
-# Re-exports kept for backward compatibility with main_window imports.
-connect_and_offer = open_offer
-
-
-# ---------- helpers ----------
-def _human_eta(remaining: int, bps: float) -> str:
-    if bps <= 0: return "--"
-    s = int(remaining / bps)
-    if s < 60: return f"{s}s"
-    m, s = divmod(s, 60)
-    if m < 60: return f"{m}m{s:02d}s"
-    h, m = divmod(m, 60)
-    return f"{h}h{m:02d}m"
-
-
-def _max_data_chunk() -> int:
-    """Largest payload that still fits one D-frame."""
-    return min(config.CHUNK, MAX_FRAME)
-
-
-# ---------- data classes ----------
 @dataclass
 class FileSpec:
     path: str
     size: int
+
     @property
     def name(self) -> str:
         return os.path.basename(self.path)
@@ -71,14 +37,12 @@ class FileSpec:
 
 @dataclass
 class IncomingOffer:
-    """A pending incoming transfer awaiting user decision."""
     kind: str
     sender_name: str
     sender_id: str
     files: list = field(default_factory=list)
     total_size: int = 0
     pin_required: bool = False
-    text: str = ""
     folder: str = ""
     _event: threading.Event = field(default_factory=threading.Event)
     _accept: bool = False
@@ -89,13 +53,13 @@ class IncomingOffer:
         self._pin = pin
         self._event.set()
 
-    def wait(self, timeout: float = 120.0) -> tuple[bool, str]:
+    def wait(self, timeout: float = 180.0) -> tuple[bool, str]:
         self._event.wait(timeout=timeout)
         return self._accept, self._pin
 
 
 # =============================================================================
-# Receiver (TLS server)
+# Server (receiver)
 # =============================================================================
 class TransferServer(QObject):
     offer_received = pyqtSignal(object)
@@ -113,9 +77,8 @@ class TransferServer(QObject):
         self._ctx: ssl.SSLContext | None = None
         self._stop = threading.Event()
 
-    # ---- lifecycle ----
     def start(self) -> None:
-        self._ctx = server_ctx()
+        self._ctx = protocol.server_ctx()
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("0.0.0.0", config.TCP_PORT))
@@ -124,19 +87,19 @@ class TransferServer(QObject):
 
     def stop(self) -> None:
         self._stop.set()
-        try:
-            if self._sock: self._sock.close()
-        except Exception:
-            pass
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
 
-    # ---- accept loop ----
     def _accept_loop(self) -> None:
         while not self._stop.is_set():
             try:
                 raw, addr = self._sock.accept()
             except OSError:
                 return
-            tune_sock(raw)
+            protocol.tune(raw)
             try:
                 tls = self._ctx.wrap_socket(raw, server_side=True)
             except ssl.SSLError as e:
@@ -145,22 +108,20 @@ class TransferServer(QObject):
                 continue
             threading.Thread(target=self._handle, args=(tls, addr), daemon=True).start()
 
-    # ---- per-connection ----
     def _handle(self, sock: ssl.SSLSocket, addr) -> None:
         wire = Wire(sock)
-        # Take ownership so we can transfer it (sync) or close it (default).
         keep_open = False
         try:
             sock.settimeout(config.SOCKET_TIMEOUT)
-            offer_msg = wire.recv_json()
-            if offer_msg.get("type") != "offer":
+            msg = wire.recv_json()
+            if msg.get("type") != "offer":
                 wire.send_json({"type": "response", "accept": False, "reason": "bad protocol"})
                 return
 
             state = self._get_state()
-            sender_name = offer_msg.get("from", "Unknown")
-            sender_id = offer_msg.get("from_id", "")
-            kind = offer_msg.get("kind", "")
+            sender = msg.get("from", "Unknown")
+            sender_id = msg.get("from_id", "")
+            kind = msg.get("kind", "")
 
             if not state["online"]:
                 wire.send_json({"type": "response", "accept": False, "reason": "offline"})
@@ -169,25 +130,23 @@ class TransferServer(QObject):
                 wire.send_json({"type": "response", "accept": False, "reason": "muted"})
                 return
 
-            files = offer_msg.get("files", []) or []
-            total_size = int(offer_msg.get("total_size", 0))
-
+            files = msg.get("files", []) or []
+            total = int(msg.get("total_size", 0))
             if kind == "files" and (
-                total_size > config.MAX_FILE_SIZE
+                total > config.MAX_FILE_SIZE
                 or any(int(f.get("size", 0)) > config.MAX_FILE_SIZE for f in files)
             ):
                 wire.send_json({"type": "response", "accept": False, "reason": "too large"})
                 return
 
             offer = IncomingOffer(
-                kind=kind, sender_name=sender_name, sender_id=sender_id,
-                files=files, total_size=total_size,
-                pin_required=bool(offer_msg.get("pin_required", False)),
-                folder=offer_msg.get("folder", ""),
+                kind=kind, sender_name=sender, sender_id=sender_id,
+                files=files, total_size=total,
+                pin_required=bool(msg.get("pin_required", False)),
+                folder=msg.get("folder", ""),
             )
             self.offer_received.emit(offer)
             accepted, pin = offer.wait(timeout=180.0)
-
             if not accepted:
                 wire.send_json({"type": "response", "accept": False, "reason": "rejected"})
                 return
@@ -196,16 +155,16 @@ class TransferServer(QObject):
 
             if kind == "text":
                 body = wire.recv_json()
-                self.text_received.emit(sender_name, str(body.get("text", "")))
+                self.text_received.emit(sender, str(body.get("text", "")))
             elif kind == "files":
                 try:
                     self._recv_files(wire, offer, state["download_dir"])
                 except Exception as e:
-                    self.recv_failed.emit(sender_name, str(e))
+                    self.recv_failed.emit(sender, str(e))
                     raise
             elif kind == "sync":
-                # Hand the Wire to the sync subsystem; do NOT close it here.
-                self.sync_started.emit(sender_name, offer.folder, wire)
+                # Hand the Wire to sync subsystem — do NOT close here.
+                self.sync_started.emit(sender, offer.folder, wire)
                 keep_open = True
         except Exception as e:
             self.log.emit(f"Receiver error from {addr}: {e}")
@@ -213,16 +172,14 @@ class TransferServer(QObject):
             if not keep_open:
                 wire.close()
 
-    # ---- files receive ----
     def _recv_files(self, wire: Wire, offer: IncomingOffer, download_dir: str) -> None:
         dest = Path(download_dir)
         dest.mkdir(parents=True, exist_ok=True)
         total = sum(int(f.get("size", 0)) for f in offer.files)
         done = 0
         start = time.monotonic()
-        last_emit = start
-        received_names: list[str] = []
-        chunk_cap = _max_data_chunk()
+        last = start
+        names: list[str] = []
 
         for _ in offer.files:
             hdr = wire.recv_json()
@@ -231,52 +188,46 @@ class TransferServer(QObject):
             name = os.path.basename(hdr.get("name", "file"))
             size = int(hdr.get("size", 0))
             part = dest / (name + ".part")
-            try: part.unlink()
-            except FileNotFoundError: pass
+            part.unlink(missing_ok=True)
 
             hasher = native.sha256_streaming()
-            file_done = 0
+            written = 0
             with part.open("wb", buffering=1 << 20) as f:
-                while file_done < size:
+                while written < size:
                     ftype, payload = wire.recv_frame()
-                    if ftype != FT_DATA:
-                        raise WireError(f"expected data, got {ftype!r}")
-                    if not payload:
-                        raise ConnectionError("unexpected empty data frame")
-                    if file_done + len(payload) > size:
+                    if ftype != FT_DATA or not payload:
+                        raise WireError("expected data frame")
+                    if written + len(payload) > size:
                         raise WireError("data overflow")
                     f.write(payload)
                     hasher.update(payload)
-                    file_done += len(payload)
+                    written += len(payload)
                     done += len(payload)
                     now = time.monotonic()
-                    if now - last_emit >= 0.1 or done == total:
+                    if now - last >= 0.1 or done == total:
                         bps = done / max(now - start, 1e-6)
-                        eta = _human_eta(total - done, bps)
-                        self.file_progress.emit(offer.sender_name, name, done, total, bps, eta)
-                        last_emit = now
+                        self.file_progress.emit(
+                            offer.sender_name, name, done, total, bps, fmt_eta(total - done, bps)
+                        )
+                        last = now
 
             tail = wire.recv_json()
             if tail.get("type") != "file_end" or tail.get("sha256") != hasher.hexdigest():
-                try: part.unlink()
-                except OSError: pass
+                part.unlink(missing_ok=True)
                 raise WireError("integrity check failed")
 
             final = unique_path(dest / name)
-            try:
-                part.replace(final)
-            except OSError as e:
-                raise WireError(f"finalize failed: {e}")
-            received_names.append(final.name)
+            part.replace(final)
+            names.append(final.name)
 
         end = wire.recv_json()
         if end.get("type") != "all_done":
             raise WireError("missing all_done")
-        self.transfer_completed.emit(offer.sender_name, received_names, done)
+        self.transfer_completed.emit(offer.sender_name, names, done)
 
 
 # =============================================================================
-# Sender (TLS client) + transfer queue
+# Sender task + queue
 # =============================================================================
 class TransferTask(QObject):
     progress = pyqtSignal(str, str, int, int, float, str)
@@ -296,16 +247,27 @@ class TransferTask(QObject):
         self.text = text
         self.pin = pin
 
+    def _offer(self) -> dict | None:
+        if self.kind == "files":
+            return {
+                "type": "offer", "kind": "files",
+                "from": self.from_name, "from_id": self.from_id,
+                "pin_required": bool(self.pin),
+                "files": [{"name": f.name, "size": f.size} for f in self.files],
+                "total_size": sum(f.size for f in self.files),
+            }
+        if self.kind == "text":
+            return {"type": "offer", "kind": "text",
+                    "from": self.from_name, "from_id": self.from_id}
+        return None
+
     def run(self) -> None:
-        offer = self._build_offer()
+        offer = self._offer()
         if offer is None:
             self.finished.emit(self.peer_name, False, "unknown kind")
             return
-        # Open Wire + send offer + read response inline so we can validate the
-        # echoed PIN before streaming any payload.
         try:
-            from .protocol import connect_wire
-            wire = connect_wire(self.peer_addr, self.peer_port)
+            wire = protocol.connect(self.peer_addr, self.peer_port)
         except Exception as e:
             self.status.emit(self.peer_name, "failed")
             self.finished.emit(self.peer_name, False, f"connect: {e}")
@@ -338,58 +300,37 @@ class TransferTask(QObject):
         finally:
             wire.close()
 
-    def _build_offer(self) -> dict | None:
-        if self.kind == "files":
-            return {
-                "type": "offer", "kind": "files",
-                "from": self.from_name, "from_id": self.from_id,
-                "pin_required": bool(self.pin),
-                "files": [{"name": f.name, "size": f.size} for f in self.files],
-                "total_size": sum(f.size for f in self.files),
-            }
-        if self.kind == "text":
-            return {
-                "type": "offer", "kind": "text",
-                "from": self.from_name, "from_id": self.from_id,
-            }
-        return None
-
     def _send_files(self, wire: Wire) -> None:
         self.status.emit(self.peer_name, "sending")
         total = sum(f.size for f in self.files)
         sent_before = 0
         start = time.monotonic()
-        chunk_cap = _max_data_chunk()
         for index, spec in enumerate(self.files):
-            wire.send_json({
-                "type": "file_begin", "index": index,
-                "name": spec.name, "size": spec.size,
-            })
-            sha256_hex = self._stream_one(wire, spec, sent_before, total, start, chunk_cap)
-            wire.send_json({"type": "file_end", "index": index, "sha256": sha256_hex})
+            wire.send_json({"type": "file_begin", "index": index, "name": spec.name, "size": spec.size})
+            digest = self._stream(wire, spec, sent_before, total, start)
+            wire.send_json({"type": "file_end", "index": index, "sha256": digest})
             sent_before += spec.size
         wire.send_json({"type": "all_done"})
 
-    def _stream_one(self, wire: Wire, spec: FileSpec,
-                    sent_before: int, total: int, start: float, chunk_cap: int) -> str:
+    def _stream(self, wire: Wire, spec: FileSpec, sent_before: int, total: int, start: float) -> str:
         hasher = native.sha256_streaming()
         file_done = 0
-        last_emit = start
+        last = start
         with open(spec.path, "rb", buffering=1 << 20) as f:
             while file_done < spec.size:
-                buf = f.read(chunk_cap)
+                buf = f.read(_CHUNK)
                 if not buf:
                     raise IOError(f"unexpected EOF in {spec.path}")
                 hasher.update(buf)
                 wire.send_data(buf)
                 file_done += len(buf)
                 now = time.monotonic()
-                if now - last_emit >= 0.1 or file_done == spec.size:
+                if now - last >= 0.1 or file_done == spec.size:
                     done = sent_before + file_done
                     bps = done / max(now - start, 1e-6)
-                    eta = _human_eta(total - done, bps)
-                    self.progress.emit(self.peer_name, spec.name, done, total, bps, eta)
-                    last_emit = now
+                    self.progress.emit(self.peer_name, spec.name, done, total,
+                                       bps, fmt_eta(total - done, bps))
+                    last = now
         return hasher.hexdigest()
 
 
@@ -407,3 +348,7 @@ class TransferQueue(QObject):
         task.status.emit(task.peer_name, "queued")
         with self._sema:
             task.run()
+
+
+# Kept for backwards compatibility (main_window imports it).
+connect_and_offer = protocol.open_offer

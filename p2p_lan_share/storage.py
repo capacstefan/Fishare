@@ -1,4 +1,4 @@
-"""Simple JSON-based persistence for settings, history, quick texts, muted peers."""
+"""Thread-safe JSON persistence for settings, history, quicktexts, muted peers."""
 from __future__ import annotations
 
 import json
@@ -8,54 +8,50 @@ from typing import Any
 
 from . import config
 
-_lock = threading.RLock()
+_LOCK = threading.RLock()
 
 
-def _load(path: Path, default: Any) -> Any:
-    with _lock:
+def _read(path: Path, default: Any) -> Any:
+    with _LOCK:
         if not path.exists():
             return default
         try:
-            with path.open("r", encoding="utf-8") as f:
-                return json.load(f)
+            return json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return default
 
 
-def _save(path: Path, data: Any) -> None:
-    with _lock:
+def _write(path: Path, data: Any) -> None:
+    with _LOCK:
         tmp = path.with_suffix(path.suffix + ".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(path)
 
 
-# Append helpers must hold the lock across load+save to avoid lost updates
-# when two background threads complete transfers simultaneously.
 def _append(path: Path, entry: Any) -> None:
-    with _lock:
-        data = _load(path, [])
+    with _LOCK:
+        data = _read(path, [])
         data.append(entry)
-        _save(path, data)
+        _write(path, data)
 
 
-# ---------- Settings ----------
+# ---- Settings ----
 def load_settings() -> dict:
     defaults = {
         "device_name": config.default_device_name(),
         "online": True,
         "download_dir": str(config.DEFAULT_DOWNLOAD_DIR),
     }
-    return {**defaults, **_load(config.SETTINGS_FILE, {})}
+    return {**defaults, **_read(config.SETTINGS_FILE, {})}
 
 
-def save_settings(settings: dict) -> None:
-    _save(config.SETTINGS_FILE, settings)
+def save_settings(s: dict) -> None:
+    _write(config.SETTINGS_FILE, s)
 
 
-# ---------- History ----------
+# ---- History ----
 def load_history() -> list[dict]:
-    return _load(config.HISTORY_FILE, [])
+    return _read(config.HISTORY_FILE, [])
 
 
 def append_history(entry: dict) -> None:
@@ -63,26 +59,22 @@ def append_history(entry: dict) -> None:
 
 
 def clear_history() -> None:
-    _save(config.HISTORY_FILE, [])
+    _write(config.HISTORY_FILE, [])
 
 
-# ---------- Quick texts (inbox) ----------
+# ---- Quick texts ----
 def load_quicktexts() -> list[dict]:
-    return _load(config.QUICKTEXTS_FILE, [])
-
-
-def append_quicktext(entry: dict) -> None:
-    _append(config.QUICKTEXTS_FILE, entry)
+    return _read(config.QUICKTEXTS_FILE, [])
 
 
 def save_quicktexts(items: list[dict]) -> None:
-    _save(config.QUICKTEXTS_FILE, items)
+    _write(config.QUICKTEXTS_FILE, items)
 
 
-# ---------- Muted peers ----------
+# ---- Muted peers ----
 def load_muted() -> set[str]:
-    return set(_load(config.MUTED_FILE, []))
+    return set(_read(config.MUTED_FILE, []))
 
 
 def save_muted(muted: set[str]) -> None:
-    _save(config.MUTED_FILE, sorted(muted))
+    _write(config.MUTED_FILE, sorted(muted))

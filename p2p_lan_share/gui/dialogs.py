@@ -1,53 +1,46 @@
-"""Reusable dialogs: Accept/Reject offer, Quick Text editor, Quick Text reader."""
+"""Reusable dialogs: Accept-offer, Quick-text editor, Quick-text reader."""
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
-    QDialog,
-    QDialogButtonBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QPlainTextEdit,
-    QPushButton,
-    QVBoxLayout,
+    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit,
+    QPlainTextEdit, QPushButton, QVBoxLayout,
 )
 
 from .. import config
-from ..util import fmt_size as _fmt_size
+from ..util import fmt_size
+
+
+def _v(dlg: QDialog) -> QVBoxLayout:
+    v = QVBoxLayout(dlg)
+    v.setContentsMargins(22, 20, 22, 18)
+    v.setSpacing(14)
+    return v
 
 
 class AcceptOfferDialog(QDialog):
-    """Shown when an incoming files/text/sync offer arrives."""
-
     def __init__(self, offer, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Incoming transfer")
         self.setMinimumWidth(420)
         self.offer = offer
 
-        v = QVBoxLayout(self)
-        v.setContentsMargins(22, 20, 22, 18)
-        v.setSpacing(14)
-
-        title = QLabel(f"From {offer.sender_name}")
-        title.setProperty("role", "h2")
+        v = _v(self)
+        title = QLabel(f"From {offer.sender_name}"); title.setProperty("role", "h2")
         v.addWidget(title)
 
         if offer.kind == "files":
             n = len(offer.files)
             msg = (f"Wants to send you {n} file{'s' if n != 1 else ''} "
-                   f"(Total: {_fmt_size(offer.total_size)}).")
+                   f"(Total: {fmt_size(offer.total_size)}).")
         elif offer.kind == "text":
             msg = "Wants to send you a quick text message."
         elif offer.kind == "sync":
             msg = f"Wants to start syncing folder \u201c{offer.folder}\u201d to your computer."
         else:
             msg = "Wants to send you something."
-
-        body = QLabel(msg)
-        body.setWordWrap(True)
+        body = QLabel(msg); body.setWordWrap(True)
         v.addWidget(body)
 
         self.pin_edit: QLineEdit | None = None
@@ -64,12 +57,10 @@ class AcceptOfferDialog(QDialog):
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        ok_btn = btns.button(QDialogButtonBox.StandardButton.Ok)
-        ok_btn.setText("Accept")
-        ok_btn.setProperty("role", "primary")
+        ok = btns.button(QDialogButtonBox.StandardButton.Ok)
+        ok.setText("Accept"); ok.setProperty("role", "primary")
         btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Reject")
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
+        btns.accepted.connect(self.accept); btns.rejected.connect(self.reject)
         v.addWidget(btns)
 
     def pin(self) -> str:
@@ -77,19 +68,13 @@ class AcceptOfferDialog(QDialog):
 
 
 class QuickTextEditor(QDialog):
-    """Compose a quick text (max 500 chars)."""
-
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Write Quick Text")
         self.resize(520, 320)
 
-        v = QVBoxLayout(self)
-        v.setContentsMargins(22, 20, 22, 18)
-        v.setSpacing(12)
-
-        title = QLabel("Quick Text")
-        title.setProperty("role", "h2")
+        v = _v(self); v.setSpacing(12)
+        title = QLabel("Quick Text"); title.setProperty("role", "h2")
         v.addWidget(title)
 
         self.edit = QPlainTextEdit(self)
@@ -105,11 +90,9 @@ class QuickTextEditor(QDialog):
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        ok_btn = btns.button(QDialogButtonBox.StandardButton.Ok)
-        ok_btn.setText("Send")
-        ok_btn.setProperty("role", "primary")
-        btns.accepted.connect(self._on_ok)
-        btns.rejected.connect(self.reject)
+        ok = btns.button(QDialogButtonBox.StandardButton.Ok)
+        ok.setText("Send"); ok.setProperty("role", "primary")
+        btns.accepted.connect(self._on_ok); btns.rejected.connect(self.reject)
         v.addWidget(btns)
 
     def _update_counter(self) -> None:
@@ -130,33 +113,22 @@ class QuickTextEditor(QDialog):
 
 
 class QuickTextReader(QDialog):
-    """Read a received quick text with a Copy button."""
-
     def __init__(self, sender: str, text: str, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"From {sender}")
         self.resize(520, 340)
-        v = QVBoxLayout(self)
-        v.setContentsMargins(22, 20, 22, 18)
-        v.setSpacing(12)
 
-        title = QLabel(f"From {sender}")
-        title.setProperty("role", "h2")
+        v = _v(self); v.setSpacing(12)
+        title = QLabel(f"From {sender}"); title.setProperty("role", "h2")
         v.addWidget(title)
 
-        box = QPlainTextEdit(self)
-        box.setPlainText(text)
-        box.setReadOnly(True)
+        box = QPlainTextEdit(self); box.setPlainText(text); box.setReadOnly(True)
         v.addWidget(box, 1)
 
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        copy_btn = QPushButton("Copy to Clipboard")
-        copy_btn.setProperty("role", "primary")
+        row = QHBoxLayout(); row.setSpacing(8)
+        copy_btn = QPushButton("Copy to Clipboard"); copy_btn.setProperty("role", "primary")
         close_btn = QPushButton("Close")
-        row.addWidget(copy_btn)
-        row.addStretch(1)
-        row.addWidget(close_btn)
+        row.addWidget(copy_btn); row.addStretch(1); row.addWidget(close_btn)
         v.addLayout(row)
 
         copy_btn.clicked.connect(lambda: QGuiApplication.clipboard().setText(text))

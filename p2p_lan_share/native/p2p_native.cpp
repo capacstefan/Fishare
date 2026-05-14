@@ -1,13 +1,12 @@
-// p2p_native.cpp — minimal SHA-256 streaming hasher exported via C ABI.
+// p2p_native.cpp — streaming SHA-256 hasher exposed via a stable C ABI.
 //
-// Compiled as p2p_native.dll, loaded by p2p_lan_share.native via ctypes.
-// ctypes.CDLL releases the Python GIL for every call into here, so the
-// per-chunk hashing in the file-transfer hot loop runs without blocking
-// other Python threads (network I/O, GUI, sync).
+// Compiled as p2p_native.dll and loaded by p2p_lan_share/native.py via ctypes.
+// ctypes.CDLL releases the Python GIL across each call, so per-chunk hashing
+// in the file-transfer hot loop runs concurrently with Python network I/O.
 //
-// No external dependencies, no STL containers; deliberately tiny.
+// FIPS 180-4 implementation. No external dependencies. No STL. Tiny by design.
 //
-// Build (VS 2022 — "x64 Native Tools Command Prompt"):
+// Build:
 //     cl /LD /O2 /EHsc /nologo /utf-8 p2p_native.cpp /Fe:p2p_native.dll
 // or just run native/build.py.
 
@@ -34,103 +33,106 @@ constexpr uint32_t K[64] = {
     0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
 };
 
+constexpr uint32_t H0[8] = {
+    0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+    0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19,
+};
+
 inline uint32_t rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+
+inline uint32_t be32(const uint8_t* p) {
+    return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16)
+         | (uint32_t(p[2]) <<  8) |  uint32_t(p[3]);
+}
 
 struct Sha256 {
     uint32_t h[8];
     uint64_t total_bits;
     uint8_t  buf[64];
     size_t   buf_len;
+
+    void init() {
+        memcpy(h, H0, sizeof(H0));
+        total_bits = 0;
+        buf_len = 0;
+    }
+
+    void compress(const uint8_t* p) {
+        uint32_t w[64];
+        for (int i = 0; i < 16; i++) w[i] = be32(p + i * 4);
+        for (int i = 16; i < 64; i++) {
+            uint32_t s0 = rotr(w[i-15],  7) ^ rotr(w[i-15], 18) ^ (w[i-15] >> 3);
+            uint32_t s1 = rotr(w[i- 2], 17) ^ rotr(w[i- 2], 19) ^ (w[i- 2] >> 10);
+            w[i] = w[i-16] + s0 + w[i-7] + s1;
+        }
+        uint32_t a=h[0], b=h[1], c=h[2], d=h[3];
+        uint32_t e=h[4], f=h[5], g=h[6], H=h[7];
+        for (int i = 0; i < 64; i++) {
+            uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+            uint32_t ch = (e & f) ^ (~e & g);
+            uint32_t t1 = H + S1 + ch + K[i] + w[i];
+            uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+            uint32_t mj = (a & b) ^ (a & c) ^ (b & c);
+            uint32_t t2 = S0 + mj;
+            H = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+        }
+        h[0]+=a; h[1]+=b; h[2]+=c; h[3]+=d;
+        h[4]+=e; h[5]+=f; h[6]+=g; h[7]+=H;
+    }
+
+    void update(const uint8_t* data, size_t len) {
+        total_bits += uint64_t(len) * 8;
+        if (buf_len) {
+            size_t take = 64 - buf_len;
+            if (take > len) take = len;
+            memcpy(buf + buf_len, data, take);
+            buf_len += take;
+            data += take; len -= take;
+            if (buf_len == 64) { compress(buf); buf_len = 0; }
+        }
+        while (len >= 64) { compress(data); data += 64; len -= 64; }
+        if (len) { memcpy(buf, data, len); buf_len = len; }
+    }
+
+    void final_(uint8_t out[32]) {
+        const uint64_t bits = total_bits;
+        buf[buf_len++] = 0x80;
+        if (buf_len > 56) {
+            while (buf_len < 64) buf[buf_len++] = 0;
+            compress(buf);
+            buf_len = 0;
+        }
+        while (buf_len < 56) buf[buf_len++] = 0;
+        for (int i = 7; i >= 0; i--) buf[buf_len++] = uint8_t(bits >> (i * 8));
+        compress(buf);
+        for (int i = 0; i < 8; i++) {
+            out[i*4    ] = uint8_t(h[i] >> 24);
+            out[i*4 + 1] = uint8_t(h[i] >> 16);
+            out[i*4 + 2] = uint8_t(h[i] >>  8);
+            out[i*4 + 3] = uint8_t(h[i]      );
+        }
+    }
 };
-
-void sha256_init(Sha256* c) {
-    static const uint32_t H0[8] = {
-        0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
-        0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19,
-    };
-    memcpy(c->h, H0, sizeof(H0));
-    c->total_bits = 0;
-    c->buf_len = 0;
-}
-
-void sha256_compress(Sha256* c, const uint8_t* p) {
-    uint32_t w[64];
-    for (int i = 0; i < 16; i++) {
-        w[i] = (uint32_t(p[i*4])<<24) | (uint32_t(p[i*4+1])<<16)
-             | (uint32_t(p[i*4+2])<<8) | uint32_t(p[i*4+3]);
-    }
-    for (int i = 16; i < 64; i++) {
-        uint32_t s0 = rotr(w[i-15],  7) ^ rotr(w[i-15], 18) ^ (w[i-15] >> 3);
-        uint32_t s1 = rotr(w[i-2],  17) ^ rotr(w[i-2],  19) ^ (w[i-2]  >> 10);
-        w[i] = w[i-16] + s0 + w[i-7] + s1;
-    }
-    uint32_t a=c->h[0], b=c->h[1], cv=c->h[2], d=c->h[3];
-    uint32_t e=c->h[4], f=c->h[5], g=c->h[6],  hh=c->h[7];
-    for (int i = 0; i < 64; i++) {
-        uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-        uint32_t ch = (e & f) ^ (~e & g);
-        uint32_t t1 = hh + S1 + ch + K[i] + w[i];
-        uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-        uint32_t mj = (a & b) ^ (a & cv) ^ (b & cv);
-        uint32_t t2 = S0 + mj;
-        hh = g; g = f; f = e; e = d + t1; d = cv; cv = b; b = a; a = t1 + t2;
-    }
-    c->h[0]+=a; c->h[1]+=b; c->h[2]+=cv; c->h[3]+=d;
-    c->h[4]+=e; c->h[5]+=f; c->h[6]+=g;  c->h[7]+=hh;
-}
-
-void sha256_update(Sha256* c, const uint8_t* data, size_t len) {
-    c->total_bits += uint64_t(len) * 8;
-    if (c->buf_len) {
-        size_t take = 64 - c->buf_len;
-        if (take > len) take = len;
-        memcpy(c->buf + c->buf_len, data, take);
-        c->buf_len += take;
-        data += take; len -= take;
-        if (c->buf_len == 64) { sha256_compress(c, c->buf); c->buf_len = 0; }
-    }
-    while (len >= 64) { sha256_compress(c, data); data += 64; len -= 64; }
-    if (len) { memcpy(c->buf, data, len); c->buf_len = len; }
-}
-
-void sha256_final(Sha256* c, uint8_t out[32]) {
-    uint64_t bits = c->total_bits;
-    c->buf[c->buf_len++] = 0x80;
-    if (c->buf_len > 56) {
-        while (c->buf_len < 64) c->buf[c->buf_len++] = 0;
-        sha256_compress(c, c->buf);
-        c->buf_len = 0;
-    }
-    while (c->buf_len < 56) c->buf[c->buf_len++] = 0;
-    for (int i = 7; i >= 0; i--) c->buf[c->buf_len++] = uint8_t(bits >> (i * 8));
-    sha256_compress(c, c->buf);
-    for (int i = 0; i < 8; i++) {
-        out[i*4    ] = uint8_t(c->h[i] >> 24);
-        out[i*4 + 1] = uint8_t(c->h[i] >> 16);
-        out[i*4 + 2] = uint8_t(c->h[i] >>  8);
-        out[i*4 + 3] = uint8_t(c->h[i]      );
-    }
-}
 
 } // namespace
 
 
 // ---- Public C ABI ---------------------------------------------------------
 P2P_API void* p2p_sha256_new(void) {
-    Sha256* c = (Sha256*)malloc(sizeof(Sha256));
-    if (c) sha256_init(c);
+    auto* c = static_cast<Sha256*>(malloc(sizeof(Sha256)));
+    if (c) c->init();
     return c;
 }
 
 P2P_API void p2p_sha256_update(void* h, const uint8_t* data, size_t len) {
-    if (h && data && len) sha256_update((Sha256*)h, data, len);
+    if (h && data && len) static_cast<Sha256*>(h)->update(data, len);
 }
 
 P2P_API void p2p_sha256_final(void* h, uint8_t out[32]) {
-    if (h && out) sha256_final((Sha256*)h, out);
+    if (h && out) static_cast<Sha256*>(h)->final_(out);
 }
 
 P2P_API void p2p_sha256_free(void* h) { free(h); }
 
-// Tiny "did we load OK?" probe used by the Python wrapper.
+// Probe used by the Python wrapper to confirm load.
 P2P_API uint32_t p2p_native_version(void) { return 0x00010000; /* 1.0.0 */ }

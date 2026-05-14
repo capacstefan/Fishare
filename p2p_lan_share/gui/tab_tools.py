@@ -1,27 +1,20 @@
-"""Tab 3: Tools — Folder Sync + QR Web Server."""
+"""Tab 3: Tools — One-Way Folder Sync + QR Web Server."""
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
-    QFileDialog,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QListWidget,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
+    QFileDialog, QGroupBox, QHBoxLayout, QLabel, QListWidget,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
+from ._widgets import muted
 from .peer_list import PeerList
-from ._widgets import muted as _muted
 
 
 class ToolsTab(QWidget):
-    sync_start_requested = pyqtSignal(str, str)  # peer_name, folder
+    sync_start_requested = pyqtSignal(str, str)
     sync_stop_requested = pyqtSignal()
-
     qr_start_requested = pyqtSignal()
     qr_stop_requested = pyqtSignal()
 
@@ -30,95 +23,80 @@ class ToolsTab(QWidget):
         self._sync_folder = ""
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(4, 4, 4, 4)
-        root.setSpacing(16)
+        root.setContentsMargins(4, 4, 4, 4); root.setSpacing(16)
 
-        # ---------- Folder sync ----------
-        sync_gb = QGroupBox("One-Way Folder Sync")
-        sv = QVBoxLayout(sync_gb)
-        sv.setContentsMargins(20, 26, 20, 18)
-        sv.setSpacing(12)
+        root.addWidget(self._build_sync(), 1)
+        root.addWidget(self._build_qr(), 1)
 
-        sv.addWidget(_muted("Sender → Receiver. Changes mirror automatically."))
-        sv.addWidget(_muted("Pick one peer"))
+    # ---- folder sync ----
+    def _build_sync(self) -> QGroupBox:
+        gb = QGroupBox("One-Way Folder Sync")
+        v = QVBoxLayout(gb); v.setContentsMargins(20, 26, 20, 18); v.setSpacing(12)
+
+        v.addWidget(muted("Sender → Receiver. Changes mirror automatically."))
+        v.addWidget(muted("Pick one peer"))
 
         self.peer_list = PeerList()
         self.peer_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        sv.addWidget(self.peer_list, 1)
+        v.addWidget(self.peer_list, 1)
 
         self.folder_label = QLabel("No folder selected")
-        self.folder_label.setWordWrap(True)
-        self.folder_label.setProperty("role", "muted")
-        sv.addWidget(self.folder_label)
+        self.folder_label.setWordWrap(True); self.folder_label.setProperty("role", "muted")
+        v.addWidget(self.folder_label)
 
-        folder_btn = QPushButton("Select Folder…")
-        folder_btn.clicked.connect(self._pick_folder)
-        sv.addWidget(folder_btn)
+        pick = QPushButton("Select Folder…"); pick.clicked.connect(self._pick_folder)
+        v.addWidget(pick)
 
-        btns = QHBoxLayout()
-        btns.setSpacing(8)
-        self.start_btn = QPushButton("Start Sync")
-        self.start_btn.setProperty("role", "primary")
-        self.stop_btn = QPushButton("Cancel Sync")
-        self.stop_btn.setProperty("role", "danger")
+        btns = QHBoxLayout(); btns.setSpacing(8)
+        self.start_btn = QPushButton("Start Sync"); self.start_btn.setProperty("role", "primary")
+        self.stop_btn = QPushButton("Cancel Sync"); self.stop_btn.setProperty("role", "danger")
         self.stop_btn.setEnabled(False)
-        self.start_btn.setMinimumHeight(42)
-        self.stop_btn.setMinimumHeight(42)
-        self.start_btn.clicked.connect(self._start_sync)
+        for b in (self.start_btn, self.stop_btn):
+            b.setMinimumHeight(42)
+        self.start_btn.clicked.connect(self._start)
         self.stop_btn.clicked.connect(self.sync_stop_requested.emit)
-        btns.addWidget(self.start_btn)
-        btns.addWidget(self.stop_btn)
-        sv.addLayout(btns)
+        btns.addWidget(self.start_btn); btns.addWidget(self.stop_btn)
+        v.addLayout(btns)
 
-        self.sync_status = QLabel("Idle")
-        self.sync_status.setProperty("role", "muted")
-        sv.addWidget(self.sync_status)
+        self.sync_status = QLabel("Idle"); self.sync_status.setProperty("role", "muted")
+        v.addWidget(self.sync_status)
+        return gb
 
-        # ---------- QR web server ----------
-        qr_gb = QGroupBox("QR Web Server")
-        qv = QVBoxLayout(qr_gb)
-        qv.setContentsMargins(20, 26, 20, 18)
-        qv.setSpacing(12)
+    # ---- QR web server ----
+    def _build_qr(self) -> QGroupBox:
+        gb = QGroupBox("QR Web Server")
+        v = QVBoxLayout(gb); v.setContentsMargins(20, 26, 20, 18); v.setSpacing(12)
 
-        qv.addWidget(_muted("Scan with your phone to upload files or send text."))
+        v.addWidget(muted("Scan with your phone to upload files or send text."))
 
         self.qr_label = QLabel("Server stopped")
         self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.qr_label.setMinimumSize(280, 280)
         self.qr_label.setStyleSheet(
-            "border: 1px dashed #d6d8dc;"
-            "border-radius: 12px;"
-            "background: #fafafa;"
-            "color: #8a8a8f;"
-            "font-size: 13pt;"
+            "border: 1px dashed #d6d8dc; border-radius: 12px;"
+            "background: #fafafa; color: #8a8a8f; font-size: 13pt;"
         )
-        qv.addWidget(self.qr_label, 1)
+        v.addWidget(self.qr_label, 1)
 
         self.url_label = QLabel("")
         self.url_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.url_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.url_label.setProperty("role", "muted")
-        qv.addWidget(self.url_label)
+        v.addWidget(self.url_label)
 
-        qr_btns = QHBoxLayout()
-        qr_btns.setSpacing(8)
-        self.qr_start_btn = QPushButton("Host Web Server")
-        self.qr_start_btn.setProperty("role", "primary")
-        self.qr_stop_btn = QPushButton("Cancel Server")
-        self.qr_stop_btn.setProperty("role", "danger")
+        btns = QHBoxLayout(); btns.setSpacing(8)
+        self.qr_start_btn = QPushButton("Host Web Server"); self.qr_start_btn.setProperty("role", "primary")
+        self.qr_stop_btn = QPushButton("Cancel Server"); self.qr_stop_btn.setProperty("role", "danger")
         self.qr_stop_btn.setEnabled(False)
-        self.qr_start_btn.setMinimumHeight(42)
-        self.qr_stop_btn.setMinimumHeight(42)
+        for b in (self.qr_start_btn, self.qr_stop_btn):
+            b.setMinimumHeight(42)
         self.qr_start_btn.clicked.connect(self.qr_start_requested.emit)
         self.qr_stop_btn.clicked.connect(self.qr_stop_requested.emit)
-        qr_btns.addWidget(self.qr_start_btn)
-        qr_btns.addWidget(self.qr_stop_btn)
-        qv.addLayout(qr_btns)
+        btns.addWidget(self.qr_start_btn); btns.addWidget(self.qr_stop_btn)
+        v.addLayout(btns)
+        return gb
 
-        root.addWidget(sync_gb, 1)
-        root.addWidget(qr_gb, 1)
-
-    # ---- peer list ----
+    # ---- peer feed ----
     def upsert_peer(self, peer) -> None:
         self.peer_list.upsert(peer)
 
@@ -132,7 +110,7 @@ class ToolsTab(QWidget):
             self._sync_folder = folder
             self.folder_label.setText(folder)
 
-    def _start_sync(self) -> None:
+    def _start(self) -> None:
         it = self.peer_list.currentItem()
         if it is None or not self._sync_folder:
             return
@@ -146,17 +124,12 @@ class ToolsTab(QWidget):
     # ---- QR ----
     def show_qr(self, url: str, pixmap: QPixmap) -> None:
         self.qr_label.setPixmap(pixmap.scaled(
-            280, 280,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            280, 280, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
         ))
         self.url_label.setText(url)
-        self.qr_start_btn.setEnabled(False)
-        self.qr_stop_btn.setEnabled(True)
+        self.qr_start_btn.setEnabled(False); self.qr_stop_btn.setEnabled(True)
 
     def hide_qr(self) -> None:
-        self.qr_label.clear()
-        self.qr_label.setText("Server stopped")
+        self.qr_label.clear(); self.qr_label.setText("Server stopped")
         self.url_label.setText("")
-        self.qr_start_btn.setEnabled(True)
-        self.qr_stop_btn.setEnabled(False)
+        self.qr_start_btn.setEnabled(True); self.qr_stop_btn.setEnabled(False)

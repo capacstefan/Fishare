@@ -1,4 +1,4 @@
-"""Tiny shared helpers — no GUI/network deps."""
+"""Tiny shared helpers (no GUI/network deps)."""
 from __future__ import annotations
 
 import socket
@@ -6,13 +6,25 @@ from pathlib import Path
 
 
 def fmt_size(n: float | int) -> str:
-    """Format a byte count as a short human-readable string."""
     n = float(n)
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024:
             return f"{int(n)} B" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} TB"
+
+
+def fmt_eta(remaining: int, bps: float) -> str:
+    if bps <= 0:
+        return "--"
+    s = int(remaining / bps)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
 
 
 def unique_path(path: Path) -> Path:
@@ -29,7 +41,6 @@ def unique_path(path: Path) -> Path:
 
 
 def local_ip() -> str:
-    """Best-effort LAN IPv4 address. Falls back to 127.0.0.1."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
