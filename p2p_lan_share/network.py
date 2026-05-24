@@ -23,6 +23,11 @@ from .protocol import FT_DATA, MAX_FRAME, Wire, WireError
 from .util import fmt_eta, unique_path
 
 _CHUNK = min(config.CHUNK, MAX_FRAME)
+_PROGRESS_INTERVAL = 0.1  # seconds between UI progress emissions
+
+
+class TransferCancelled(Exception):
+    """Raised internally when a transfer is cancelled by the user."""
 
 
 @dataclass
@@ -66,6 +71,7 @@ class TransferServer(QObject):
     file_progress = pyqtSignal(str, str, int, int, float, str)
     transfer_completed = pyqtSignal(str, list, int)
     recv_failed = pyqtSignal(str, str)
+    recv_cancelled = pyqtSignal(str)
     text_received = pyqtSignal(str, str)
     sync_started = pyqtSignal(str, str, object)  # name, folder, Wire
     log = pyqtSignal(str)
@@ -76,6 +82,27 @@ class TransferServer(QObject):
         self._sock: socket.socket | None = None
         self._ctx: ssl.SSLContext | None = None
         self._stop = threading.Event()
+        # Active inbound file transfers, keyed by sender display name.
+        self._active_recv: dict[str, Wire] = {}
+        self._cancelled_recv: set[str] = set()
+        self._recv_lock = threading.Lock()
+
+    # ---- public cancellation API -----------------------------------
+    def cancel_recv(self, sender_name: str) -> bool:
+        """Abort an inbound file transfer from `sender_name`. Idempotent.
+
+        Returns True if a transfer was actively cancelled.
+        """
+        with self._recv_lock:
+            wire = self._active_recv.pop(sender_name, None)
+            if wire is None:
+                return False
+            self._cancelled_recv.add(sender_name)
+        try:
+            wire.close()
+        except Exception:
+            pass
+        return True
 
     def start(self) -> None:
         self._ctx = protocol.server_ctx()
@@ -157,11 +184,19 @@ class TransferServer(QObject):
                 body = wire.recv_json()
                 self.text_received.emit(sender, str(body.get("text", "")))
             elif kind == "files":
+                with self._recv_lock:
+                    self._active_recv[sender] = wire
                 try:
                     self._recv_files(wire, offer, state["download_dir"])
                 except Exception as e:
-                    self.recv_failed.emit(sender, str(e))
+                    if self._consume_cancel(sender):
+                        self.recv_cancelled.emit(sender)
+                    else:
+                        self.recv_failed.emit(sender, str(e))
                     raise
+                finally:
+                    with self._recv_lock:
+                        self._active_recv.pop(sender, None)
             elif kind == "sync":
                 # Hand the Wire to sync subsystem — do NOT close here.
                 self.sync_started.emit(sender, offer.folder, wire)
@@ -172,13 +207,20 @@ class TransferServer(QObject):
             if not keep_open:
                 wire.close()
 
+    def _consume_cancel(self, sender_name: str) -> bool:
+        with self._recv_lock:
+            if sender_name not in self._cancelled_recv:
+                return False
+            self._cancelled_recv.discard(sender_name)
+            return True
+
     def _recv_files(self, wire: Wire, offer: IncomingOffer, download_dir: str) -> None:
         dest = Path(download_dir)
         dest.mkdir(parents=True, exist_ok=True)
         total = sum(int(f.get("size", 0)) for f in offer.files)
         done = 0
         start = time.monotonic()
-        last = start
+        last = 0.0  # ensures the first chunk always emits
         names: list[str] = []
 
         for _ in offer.files:
@@ -204,10 +246,12 @@ class TransferServer(QObject):
                     written += len(payload)
                     done += len(payload)
                     now = time.monotonic()
-                    if now - last >= 0.1 or done == total:
-                        bps = done / max(now - start, 1e-6)
+                    if now - last >= _PROGRESS_INTERVAL or done == total:
+                        capped = min(done, total)
+                        bps = capped / max(now - start, 1e-6)
                         self.file_progress.emit(
-                            offer.sender_name, name, done, total, bps, fmt_eta(total - done, bps)
+                            offer.sender_name, name, capped, total, bps,
+                            fmt_eta(max(total - capped, 0), bps),
                         )
                         last = now
 
@@ -246,6 +290,29 @@ class TransferTask(QObject):
         self.files = files or []
         self.text = text
         self.pin = pin
+        self._cancel = threading.Event()
+        self._wire: Wire | None = None
+
+    # ---- public cancellation API -----------------------------------
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
+
+    def cancel(self) -> bool:
+        """Request cancellation. Idempotent; safe to call from any thread.
+
+        Returns True the first time it transitions from active to cancelled.
+        """
+        if self._cancel.is_set():
+            return False
+        self._cancel.set()
+        wire = self._wire
+        if wire is not None:
+            try:
+                wire.close()
+            except Exception:
+                pass
+        return True
 
     def _offer(self) -> dict | None:
         if self.kind == "files":
@@ -266,11 +333,23 @@ class TransferTask(QObject):
         if offer is None:
             self.finished.emit(self.peer_name, False, "unknown kind")
             return
+        if self._cancel.is_set():
+            self._emit_cancelled()
+            return
         try:
             wire = protocol.connect(self.peer_addr, self.peer_port)
         except Exception as e:
+            if self._cancel.is_set():
+                self._emit_cancelled()
+                return
             self.status.emit(self.peer_name, "failed")
             self.finished.emit(self.peer_name, False, f"connect: {e}")
+            return
+
+        self._wire = wire
+        if self._cancel.is_set():
+            wire.close()
+            self._emit_cancelled()
             return
 
         try:
@@ -294,11 +373,24 @@ class TransferTask(QObject):
                 self._send_files(wire)
             self.status.emit(self.peer_name, "done")
             self.finished.emit(self.peer_name, True, "")
+        except TransferCancelled:
+            self._emit_cancelled()
         except Exception as e:
-            self.status.emit(self.peer_name, "failed")
-            self.finished.emit(self.peer_name, False, str(e))
+            if self._cancel.is_set():
+                self._emit_cancelled()
+            else:
+                self.status.emit(self.peer_name, "failed")
+                self.finished.emit(self.peer_name, False, str(e))
         finally:
-            wire.close()
+            self._wire = None
+            try:
+                wire.close()
+            except Exception:
+                pass
+
+    def _emit_cancelled(self) -> None:
+        self.status.emit(self.peer_name, "cancelled")
+        self.finished.emit(self.peer_name, False, "cancelled")
 
     def _send_files(self, wire: Wire) -> None:
         self.status.emit(self.peer_name, "sending")
@@ -306,6 +398,8 @@ class TransferTask(QObject):
         sent_before = 0
         start = time.monotonic()
         for index, spec in enumerate(self.files):
+            if self._cancel.is_set():
+                raise TransferCancelled()
             wire.send_json({"type": "file_begin", "index": index, "name": spec.name, "size": spec.size})
             digest = self._stream(wire, spec, sent_before, total, start)
             wire.send_json({"type": "file_end", "index": index, "sha256": digest})
@@ -315,21 +409,24 @@ class TransferTask(QObject):
     def _stream(self, wire: Wire, spec: FileSpec, sent_before: int, total: int, start: float) -> str:
         hasher = native.sha256_streaming()
         file_done = 0
-        last = start
+        last = 0.0  # ensures progress emits on the very first chunk
         with open(spec.path, "rb", buffering=1 << 20) as f:
             while file_done < spec.size:
-                buf = f.read(_CHUNK)
+                if self._cancel.is_set():
+                    raise TransferCancelled()
+                remaining = spec.size - file_done
+                buf = f.read(min(_CHUNK, remaining))
                 if not buf:
                     raise IOError(f"unexpected EOF in {spec.path}")
                 hasher.update(buf)
                 wire.send_data(buf)
                 file_done += len(buf)
                 now = time.monotonic()
-                if now - last >= 0.1 or file_done == spec.size:
-                    done = sent_before + file_done
+                if now - last >= _PROGRESS_INTERVAL or file_done == spec.size:
+                    done = min(sent_before + file_done, total)
                     bps = done / max(now - start, 1e-6)
                     self.progress.emit(self.peer_name, spec.name, done, total,
-                                       bps, fmt_eta(total - done, bps))
+                                       bps, fmt_eta(max(total - done, 0), bps))
                     last = now
         return hasher.hexdigest()
 
@@ -346,7 +443,13 @@ class TransferQueue(QObject):
 
     def _run(self, task: TransferTask) -> None:
         task.status.emit(task.peer_name, "queued")
+        if task.cancelled:
+            task._emit_cancelled()
+            return
         with self._sema:
+            if task.cancelled:
+                task._emit_cancelled()
+                return
             task.run()
 
 

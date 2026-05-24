@@ -93,6 +93,7 @@ class MainWindow(QMainWindow):
         tt.choose_download_dir.connect(self._pick_download_dir)
         tt.send_requested.connect(self._send_files)
         tt.mute_toggled.connect(self._toggle_mute)
+        tt.cancel_requested.connect(self._on_cancel)
 
         tx.send_text_requested.connect(self._send_text)
         tx.mute_toggled.connect(self._toggle_mute)
@@ -107,6 +108,7 @@ class MainWindow(QMainWindow):
         s.file_progress.connect(self._on_recv_progress)
         s.transfer_completed.connect(self._on_recv_completed)
         s.recv_failed.connect(tt.on_recv_failed)
+        s.recv_cancelled.connect(tt.on_recv_cancelled)
         s.text_received.connect(self._on_text_received)
         s.sync_started.connect(self._on_incoming_sync)
         s.log.connect(lambda m: self.statusBar().showMessage(m, 4000))
@@ -265,7 +267,10 @@ class MainWindow(QMainWindow):
 
     def _on_send_done(self, peer_name, ok, reason, kind, size, count) -> None:
         if not ok:
-            self.notify(f"Failed to {peer_name}: {reason}")
+            if reason == "cancelled":
+                self.notify(f"Cancelled transfer to {peer_name}")
+            else:
+                self.notify(f"Failed to {peer_name}: {reason}")
             return
         entry = {
             "date": _now(),
@@ -276,6 +281,32 @@ class MainWindow(QMainWindow):
         storage.append_history(entry)
         self.tab_history.append(entry)
         self.notify(f"Sent to {peer_name}")
+
+    # =================================================================
+    # Cancellation
+    # =================================================================
+    def _on_cancel(self, direction: str, peer: str) -> None:
+        if direction == "up":
+            cancelled = self._cancel_outbound(peer)
+            self.notify(f"Cancelling transfer to {peer}…" if cancelled
+                        else f"Nothing to cancel for {peer}")
+        elif direction == "down":
+            cancelled = self.server.cancel_recv(peer)
+            self.notify(f"Cancelling transfer from {peer}…" if cancelled
+                        else f"Nothing to cancel from {peer}")
+
+    def _cancel_outbound(self, peer_name: str) -> bool:
+        """Cancel every live outbound task targeting `peer_name`. Idempotent."""
+        cancelled_any = False
+        for task in list(self._live_tasks):
+            if task.peer_name != peer_name or task.kind != "files":
+                continue
+            try:
+                if task.cancel():
+                    cancelled_any = True
+            except Exception:
+                pass
+        return cancelled_any
 
     # =================================================================
     # Receiving
