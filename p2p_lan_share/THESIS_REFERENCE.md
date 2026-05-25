@@ -25,8 +25,9 @@ running heavy collaboration suites for a 5 MB hand-off.
   on first run; identity is the SHA-256 fingerprint of that certificate.
 - **Integrity:** every file is hashed with streaming SHA-256 (custom C++
   module, GIL-released) and verified after transfer.
-- **Phone bridge:** an on-demand QR-code web server lets any phone in the
-  same Wi-Fi upload files / send text without installing anything.
+- **Phone bridge:** an on-demand QR-code web server (HTTPS, self-signed)
+   lets any phone in the same Wi-Fi upload files / send text without
+   installing anything.
 - **Folder sync:** one-way watchdog-driven live mirroring.
 - **Stack:** Python 3.11, PyQt6, Zeroconf, cryptography, Flask, watchdog,
   qrcode + a C++ native DLL for SHA-256.
@@ -94,11 +95,13 @@ failed / cancelled / offline`).
 
 ### 2.5 QR Web Server (phone bridge)
 
-1. Generates a QR code containing `http://<lan-ip>:51822/<token>/`.
+1. Generates a QR code containing `https://<lan-ip>:51822/<token>/`
+   (self-signed HTTPS; a browser warning is expected).
 2. The token is a 16-byte `secrets.token_urlsafe` — URLs cannot be guessed.
 3. Token check uses `hmac.compare_digest` (timing-safe).
 4. Mobile-first responsive HTML (Apple-inspired styling).
 5. Upload multiple files at once; up to 500-char quick text.
+   Total upload cap is 4 GB; max 20 files per request.
 6. Uploads land in the same download folder; history entry is created.
 7. Server runs in a background thread; **Stop** shuts it down cleanly.
 
@@ -227,7 +230,8 @@ send_data / recv_frame`.
 - **Integrity hash** (SHA-256) per file, end-to-end.
 - **Path traversal protection** in `sync.py::_safe()`.
 - **Timing-safe token compare** in `web_server.py` (`hmac.compare_digest`).
-- **HTTP MAX_CONTENT_LENGTH** to bound phone uploads.
+- **QR HTTPS** with a self-signed certificate (browser warning unless trusted).
+- **QR upload limits**: 4 GB total and max 20 files per request.
 - **Sandbox by filename**: every received file is written as `*.part`
   first, only renamed on hash success — half-files never appear.
 - **No outbound Internet calls**: app is fully usable offline.
@@ -269,7 +273,7 @@ send_data / recv_frame`.
 | 9   | Two peers share the same display name              | mDNS service name embeds the fingerprint; UI shows an impersonation warning.                                                                     |
 | 10  | Device renamed                                     | `peer_id` (cert fingerprint) is stable → mute list still applies; history keeps both names.                                                      |
 | 11  | App offline                                        | `_handle()` rejects offers with reason `"offline"`; sender's row shows "offline".                                                                |
-| 12  | Phone uploads > limit                              | Flask `MAX_CONTENT_LENGTH` returns HTTP 413.                                                                                                     |
+| 12  | QR uploads > 4 GB or too many files                 | Flask `MAX_CONTENT_LENGTH` returns HTTP 413; file-count limit returns a UI error.                                                                 |
 | 13  | Concurrent multi-recipient send                    | One task per recipient; each has its own row; semaphore caps to 3 simultaneous.                                                                  |
 | 14  | Crash recovery                                     | Settings, history, muted list are stored via atomic `*.tmp + replace`.                                                                           |
 | 15  | Storage JSON corrupted                             | `_read` returns the default and the app keeps running.                                                                                           |
@@ -417,7 +421,7 @@ Three nodes, one network.
    |   - p2p_native.dll      |                  |   - p2p_native.dll      |
    +-------------------------+                  +-------------------------+
                 ^
-                |  HTTP 51822 (token URL, same LAN)
+                |  HTTPS 51822 (token URL, same LAN)
                 v
         +---------------+
         |   Phone       |
@@ -656,7 +660,7 @@ Sequence per kind:
 - Output: `dist/P2P LAN Share.exe` (~68 MB), self-contained, no installer
   required, no admin rights needed.
 - Persistent user data lives in `%APPDATA%\p2p_lan_share\`.
-- Required firewall rules: TCP 51821 (transfer), TCP 51822 (QR web),
+- Required firewall rules: TCP 51821 (transfer), TCP 51822 (QR web HTTPS),
   UDP 5353 (mDNS) — Windows prompts on first run.
 
 ---

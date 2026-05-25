@@ -11,10 +11,11 @@ import qrcode
 from flask import Flask, abort, render_template_string, request
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
+from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.serving import make_server
 
-from . import config
-from .util import local_ip, unique_path
+from . import config, crypto_utils
+from .util import fmt_size, local_ip, unique_path
 
 
 PAGE = """<!doctype html>
@@ -98,10 +99,17 @@ class QrWebServer(QObject):
     def start(self) -> None:
         if self._server is not None:
             return
-        self._server = make_server("0.0.0.0", config.WEB_PORT, self._make_app(), threaded=True)
+        cert, key = crypto_utils.ensure_cert()
+        self._server = make_server(
+            "0.0.0.0",
+            config.WEB_PORT,
+            self._make_app(),
+            threaded=True,
+            ssl_context=(cert, key),
+        )
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
-        url = f"http://{local_ip()}:{config.WEB_PORT}/{self._token}/"
+        url = f"https://{local_ip()}:{config.WEB_PORT}/{self._token}/"
         self.started.emit(url, self._qr_pixmap(url))
 
     def stop(self) -> None:
@@ -117,12 +125,19 @@ class QrWebServer(QObject):
 
     def _make_app(self) -> Flask:
         app = Flask(__name__)
-        app.config["MAX_CONTENT_LENGTH"] = config.MAX_FILE_SIZE
+        app.config["MAX_CONTENT_LENGTH"] = config.WEB_MAX_TOTAL_BYTES
         name, dest, token = self._name, self._dir, self._token
+        max_files = config.WEB_MAX_FILES
+        max_total = config.WEB_MAX_TOTAL_BYTES
 
         def check(tok: str) -> None:
             if not hmac.compare_digest(tok, token):
                 abort(404)
+
+        @app.errorhandler(RequestEntityTooLarge)
+        def too_large(_err):
+            msg = f"Upload too large. Max total is {fmt_size(max_total)}."
+            return render_template_string(PAGE, name=name, msg=msg, cls="err"), 413
 
         @app.route("/<tok>/", methods=["GET"])
         def index(tok):
@@ -132,14 +147,19 @@ class QrWebServer(QObject):
         @app.route("/<tok>/upload", methods=["POST"])
         def upload(tok):
             check(tok)
-            files = request.files.getlist("files")
+            files = [fs for fs in request.files.getlist("files") if fs and fs.filename]
             if not files:
                 return render_template_string(PAGE, name=name, msg="No files.", cls="err")
+            if len(files) > max_files:
+                return render_template_string(
+                    PAGE,
+                    name=name,
+                    msg=f"Too many files. Max is {max_files}.",
+                    cls="err",
+                )
             dest.mkdir(parents=True, exist_ok=True)
             saved = 0
             for fs in files:
-                if not fs or not fs.filename:
-                    continue
                 target = unique_path(dest / Path(fs.filename).name)
                 fs.save(str(target))
                 self.file_received.emit(target.name, str(target), target.stat().st_size)

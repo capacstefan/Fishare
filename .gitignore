@@ -16,6 +16,22 @@ dist/
 *.egg-info/
 .eggs/
 
+# PyInstaller / app packaging
+p2p_lan_share/_pyinstaller_entry.py
+p2p_lan_share/P2P LAN Share.spec
+
+# Native build artifacts
+p2p_lan_share/p2p_native.dll
+p2p_lan_share/libp2p_native.so
+p2p_lan_share/libp2p_native.dylib
+p2p_lan_share/native/p2p_native.dll
+p2p_lan_share/native/libp2p_native.so
+p2p_lan_share/native/libp2p_native.dylib
+p2p_lan_share/native/*.obj
+p2p_lan_share/native/*.lib
+p2p_lan_share/native/*.exp
+p2p_lan_share/native/*.pdb
+
 # Test / coverage caches
 .pytest_cache/
 .coverage
