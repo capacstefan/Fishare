@@ -1,6 +1,6 @@
 """Build a standalone Windows executable using PyInstaller.
 
-Run from the workspace root (the `p2p_lan_share` package folder):
+Run from the project root:
 
     py build_exe.py
 
@@ -16,12 +16,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-PKG_DIR = Path(__file__).resolve().parent
-PARENT_DIR = PKG_DIR.parent
+ROOT_DIR = Path(__file__).resolve().parent
+PKG_DIR = ROOT_DIR / "p2p_lan_share"
 PKG_NAME = PKG_DIR.name  # "p2p_lan_share"
 APP_NAME = "P2P LAN Share"
 
-ENTRY_SCRIPT = PKG_DIR / "_pyinstaller_entry.py"
+ENTRY_SCRIPT = ROOT_DIR / "_pyinstaller_entry.py"
 DLL_NAME = "p2p_native.dll"
 
 
@@ -46,10 +46,10 @@ def write_entry_script() -> None:
 
 def clean() -> None:
     for d in ("build", "dist"):
-        p = PKG_DIR / d
+        p = ROOT_DIR / d
         if p.exists():
             shutil.rmtree(p, ignore_errors=True)
-    spec = PKG_DIR / f"{APP_NAME}.spec"
+    spec = ROOT_DIR / f"{APP_NAME}.spec"
     if spec.exists():
         spec.unlink()
 
@@ -57,7 +57,10 @@ def clean() -> None:
 def build() -> int:
     dll = PKG_DIR / DLL_NAME
     if not dll.exists():
-        print(f"!! {DLL_NAME} not found in {PKG_DIR}. Build it first: py native/build.py")
+        print(
+            f"!! {DLL_NAME} not found in {PKG_DIR}. "
+            "Build it first: py p2p_lan_share/native/build.py"
+        )
         return 1
 
     args = [
@@ -67,7 +70,7 @@ def build() -> int:
         "--onefile",
         "--windowed",
         "--name", APP_NAME,
-        "--paths", str(PARENT_DIR),
+        "--paths", str(ROOT_DIR),
         # Place the DLL inside the bundled package dir so native.py finds it.
         "--add-binary", f"{dll}{';'}{PKG_NAME}",
         "--collect-submodules", PKG_NAME,
@@ -77,7 +80,7 @@ def build() -> int:
         str(ENTRY_SCRIPT),
     ]
     print(">>", " ".join(args))
-    return subprocess.call(args, cwd=str(PKG_DIR))
+    return subprocess.call(args, cwd=str(ROOT_DIR))
 
 
 def main() -> int:
@@ -92,7 +95,7 @@ def main() -> int:
         except OSError:
             pass
     if rc == 0:
-        out = PKG_DIR / "dist" / f"{APP_NAME}.exe"
+        out = ROOT_DIR / "dist" / f"{APP_NAME}.exe"
         print(f"\n[OK] Built: {out}")
     else:
         print("\n[FAIL] PyInstaller returned", rc)

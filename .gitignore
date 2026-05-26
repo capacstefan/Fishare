@@ -17,6 +17,8 @@ dist/
 .eggs/
 
 # PyInstaller / app packaging
+_pyinstaller_entry.py
+P2P LAN Share.spec
 p2p_lan_share/_pyinstaller_entry.py
 p2p_lan_share/P2P LAN Share.spec
 
