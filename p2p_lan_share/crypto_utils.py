@@ -1,9 +1,12 @@
 """Generate a persistent self-signed TLS certificate on first run."""
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import socket
+import ssl
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -50,3 +53,21 @@ def ensure_cert() -> tuple[str, str]:
         encryption_algorithm=serialization.NoEncryption(),
     ))
     return str(config.CERT_FILE), str(config.KEY_FILE)
+
+
+def fingerprint_from_der(der_bytes: bytes) -> str:
+    return hashlib.sha256(der_bytes).hexdigest()
+
+
+def fingerprint_from_pem_bytes(pem_bytes: bytes) -> str:
+    try:
+        pem_text = pem_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        pem_text = pem_bytes.decode("utf-8", "ignore")
+    der = ssl.PEM_cert_to_DER_cert(pem_text)
+    return fingerprint_from_der(der)
+
+
+def local_cert_fingerprint() -> str:
+    cert, _ = ensure_cert()
+    return fingerprint_from_pem_bytes(Path(cert).read_bytes())

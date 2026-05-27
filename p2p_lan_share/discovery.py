@@ -6,13 +6,11 @@ cannot be forged without the private key.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import socket
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from zeroconf import ServiceBrowser, ServiceInfo, ServiceStateChange, Zeroconf
@@ -25,8 +23,7 @@ _HEARTBEAT = 20  # seconds
 
 
 def _peer_id() -> str:
-    cert, _ = crypto_utils.ensure_cert()
-    return hashlib.sha256(Path(cert).read_bytes()).hexdigest()[:16]
+    return crypto_utils.local_cert_fingerprint()[:16]
 
 
 @dataclass

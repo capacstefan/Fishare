@@ -32,6 +32,7 @@ SETTINGS_FILE = APP_DATA_DIR / "settings.json"
 HISTORY_FILE = APP_DATA_DIR / "history.json"
 QUICKTEXTS_FILE = APP_DATA_DIR / "quicktexts.json"
 MUTED_FILE = APP_DATA_DIR / "muted.json"
+PINS_FILE = APP_DATA_DIR / "pins.json"
 CERT_FILE = APP_DATA_DIR / "cert.pem"
 KEY_FILE = APP_DATA_DIR / "key.pem"
 

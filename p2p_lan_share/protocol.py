@@ -42,6 +42,16 @@ class Wire:
             raise WireError(f"data frame too large: {len(payload)}")
         self._send(FT_DATA, payload)
 
+    def peer_fingerprint(self) -> str | None:
+        try:
+            der = self._s.getpeercert(binary_form=True)
+        except (ValueError, ssl.SSLError):
+            return None
+        if not der:
+            return None
+        from . import crypto_utils
+        return crypto_utils.fingerprint_from_der(der)
+
     def _send(self, ftype: bytes, payload: bytes) -> None:
         head = _HEADER.pack(ftype, len(payload))
         with self._send_lock:
@@ -90,6 +100,8 @@ def server_ctx() -> ssl.SSLContext:
     cert, key = crypto_utils.ensure_cert()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert, key)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_3
     return ctx
 
 
@@ -97,6 +109,8 @@ def client_ctx() -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_3
     return ctx
 
 

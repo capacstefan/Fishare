@@ -78,3 +78,33 @@ def load_muted() -> set[str]:
 
 def save_muted(muted: set[str]) -> None:
     _write(config.MUTED_FILE, sorted(muted))
+
+
+# ---- Peer pins ----
+def load_pins() -> dict[str, str]:
+    raw = _read(config.PINS_FILE, {})
+    if not isinstance(raw, dict):
+        return {}
+    pins: dict[str, str] = {}
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, str) and k and v:
+            pins[k] = v
+    return pins
+
+
+def save_pins(pins: dict[str, str]) -> None:
+    _write(config.PINS_FILE, dict(sorted(pins.items())))
+
+
+def check_and_pin(peer_id: str, fingerprint: str) -> tuple[bool, str]:
+    if not peer_id or not fingerprint:
+        return False, "missing identity"
+    with _LOCK:
+        pins = load_pins()
+        existing = pins.get(peer_id)
+        if existing and existing != fingerprint:
+            return False, "pinned fingerprint mismatch"
+        if not existing:
+            pins[peer_id] = fingerprint
+            save_pins(pins)
+    return True, ""

@@ -191,6 +191,7 @@ class MainWindow(QMainWindow):
             peer_name=peer.name, peer_addr=peer.address, peer_port=peer.port,
             kind=kind,
             from_name=self.settings["device_name"], from_id=self.registry.peer_id,
+            peer_id=peer.peer_id,
             **kwargs,
         )
 
@@ -380,7 +381,7 @@ class MainWindow(QMainWindow):
                 "from": self.settings["device_name"],
                 "from_id": self.registry.peer_id,
                 "folder": Path(folder).name,
-            })
+            }, expected_peer_id=peer.peer_id)
         except Exception as e:
             QMessageBox.warning(self, "Sync", f"Could not start sync: {e}")
             return

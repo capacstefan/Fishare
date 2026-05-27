@@ -18,7 +18,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from . import config, native, protocol
+from . import config, native, protocol, storage
 from .protocol import FT_DATA, MAX_FRAME, Wire, WireError
 from .util import fmt_eta, unique_path
 
@@ -157,6 +157,18 @@ class TransferServer(QObject):
                 wire.send_json({"type": "response", "accept": False, "reason": "muted"})
                 return
 
+            peer_fp = wire.peer_fingerprint()
+            if peer_fp and sender_id:
+                if peer_fp[:len(sender_id)] != sender_id:
+                    wire.send_json({"type": "response", "accept": False,
+                                    "reason": "identity mismatch"})
+                    return
+                ok, reason = storage.check_and_pin(sender_id, peer_fp)
+                if not ok:
+                    wire.send_json({"type": "response", "accept": False,
+                                    "reason": reason or "pinned fingerprint mismatch"})
+                    return
+
             files = msg.get("files", []) or []
             total = int(msg.get("total_size", 0))
             if kind == "files" and (
@@ -279,7 +291,7 @@ class TransferTask(QObject):
     finished = pyqtSignal(str, bool, str)
 
     def __init__(self, peer_name, peer_addr, peer_port, kind,
-                 from_name, from_id, files=None, text="", pin="") -> None:
+                 from_name, from_id, peer_id="", files=None, text="", pin="") -> None:
         super().__init__()
         self.peer_name = peer_name
         self.peer_addr = peer_addr
@@ -287,6 +299,7 @@ class TransferTask(QObject):
         self.kind = kind
         self.from_name = from_name
         self.from_id = from_id
+        self.peer_id = peer_id or ""
         self.files = files or []
         self.text = text
         self.pin = pin
@@ -328,6 +341,19 @@ class TransferTask(QObject):
                     "from": self.from_name, "from_id": self.from_id}
         return None
 
+    def _verify_peer(self, wire: Wire) -> tuple[bool, str]:
+        if not self.peer_id:
+            return True, ""
+        fp = wire.peer_fingerprint()
+        if not fp:
+            return False, "peer certificate missing"
+        if fp[:len(self.peer_id)] != self.peer_id:
+            return False, "peer identity mismatch"
+        ok, reason = storage.check_and_pin(self.peer_id, fp)
+        if not ok:
+            return False, reason or "pinned fingerprint mismatch"
+        return True, ""
+
     def run(self) -> None:
         offer = self._offer()
         if offer is None:
@@ -350,6 +376,12 @@ class TransferTask(QObject):
         if self._cancel.is_set():
             wire.close()
             self._emit_cancelled()
+            return
+
+        ok, reason = self._verify_peer(wire)
+        if not ok:
+            self.status.emit(self.peer_name, "failed")
+            self.finished.emit(self.peer_name, False, reason)
             return
 
         try:
@@ -453,5 +485,37 @@ class TransferQueue(QObject):
             task.run()
 
 
-# Kept for backwards compatibility (main_window imports it).
-connect_and_offer = protocol.open_offer
+def _verify_and_pin_peer(wire: Wire, expected_peer_id: str | None) -> tuple[bool, str]:
+    if not expected_peer_id:
+        return True, ""
+    fp = wire.peer_fingerprint()
+    if not fp:
+        return False, "peer certificate missing"
+    if fp[:len(expected_peer_id)] != expected_peer_id:
+        return False, "peer identity mismatch"
+    ok, reason = storage.check_and_pin(expected_peer_id, fp)
+    if not ok:
+        return False, reason or "pinned fingerprint mismatch"
+    return True, ""
+
+
+def connect_and_offer(addr: str, port: int, offer: dict,
+                      accept_timeout: float = 180.0,
+                      expected_peer_id: str | None = None) -> Wire:
+    """Connect, verify peer identity, send offer, wait for accept."""
+    w = protocol.connect(addr, port)
+    try:
+        ok, reason = _verify_and_pin_peer(w, expected_peer_id)
+        if not ok:
+            raise RuntimeError(reason)
+        w.send_json(offer)
+        w.settimeout(accept_timeout)
+        resp = w.recv_json()
+    except Exception:
+        w.close()
+        raise
+    if not resp.get("accept"):
+        w.close()
+        raise RuntimeError(resp.get("reason", "rejected"))
+    w.settimeout(None)
+    return w
