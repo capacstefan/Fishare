@@ -109,6 +109,7 @@ class MainWindow(QMainWindow):
         s.transfer_completed.connect(self._on_recv_completed)
         s.recv_failed.connect(tt.on_recv_failed)
         s.recv_cancelled.connect(tt.on_recv_cancelled)
+        s.recv_cancelled.connect(self._on_recv_cancelled)
         s.text_received.connect(self._on_text_received)
         s.sync_started.connect(self._on_incoming_sync)
         s.log.connect(lambda m: self.statusBar().showMessage(m, 4000))
@@ -269,6 +270,14 @@ class MainWindow(QMainWindow):
     def _on_send_done(self, peer_name, ok, reason, kind, size, count) -> None:
         if not ok:
             if reason == "cancelled":
+                entry = {
+                    "date": _now(),
+                    "size": size if kind == "File" else 0,
+                    "count": count if kind == "File" else 0,
+                    "direction": "Cancelled", "peer": peer_name, "type": kind,
+                }
+                storage.append_history(entry)
+                self.tab_history.append(entry)
                 self.notify(f"Cancelled transfer to {peer_name}")
             else:
                 self.notify(f"Failed to {peer_name}: {reason}")
@@ -329,6 +338,19 @@ class MainWindow(QMainWindow):
         offer.respond(ok, dlg.pin() if ok else "")
         if ok:
             self.notify(f"Accepting from {offer.sender_name}…")
+        else:
+            kind = (offer.kind or "").lower()
+            if kind in {"files", "text"}:
+                entry = {
+                    "date": _now(),
+                    "size": offer.total_size if kind == "files" else 0,
+                    "count": len(offer.files) if kind == "files" else 0,
+                    "direction": "Rejected", "peer": offer.sender_name,
+                    "type": "File" if kind == "files" else "QuickText",
+                }
+                storage.append_history(entry)
+                self.tab_history.append(entry)
+            self.notify(f"Rejected transfer from {offer.sender_name}")
 
     def _on_recv_progress(self, sender, filename, done, total, bps, eta) -> None:
         self.tab_transfer.on_recv_progress(sender, filename, done, total, bps, eta)
@@ -348,6 +370,16 @@ class MainWindow(QMainWindow):
         self.tab_history.append(entry)
         self.tab_transfer.on_recv_completed(sender)
         self.notify(f"Received {len(filenames)} file(s) from {sender}")
+
+    def _on_recv_cancelled(self, sender) -> None:
+        entry = {
+            "date": _now(),
+            "size": 0, "count": 0,
+            "direction": "Cancelled", "peer": sender, "type": "File",
+        }
+        storage.append_history(entry)
+        self.tab_history.append(entry)
+        self.notify(f"Cancelled transfer from {sender}")
 
     def _on_text_received(self, sender, text) -> None:
         items = storage.load_quicktexts()
