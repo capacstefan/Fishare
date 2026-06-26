@@ -12,8 +12,9 @@
 
 ## 1. Executive Summary
 
-**P2P LAN Share** is a Windows desktop application for _zero-configuration_
-peer-to-peer file, text and folder sharing inside a local network. It
+**P2P LAN Share** is a cross-platform (Windows and Linux) desktop
+application for _zero-configuration_ peer-to-peer file, text and folder
+sharing inside a local network. It
 replaces ad-hoc workflows such as e-mailing files to yourself, plugging in
 USB sticks, uploading to a cloud just to download two metres away, or
 running heavy collaboration suites for a 5 MB hand-off.
@@ -26,11 +27,14 @@ running heavy collaboration suites for a 5 MB hand-off.
 - **Integrity:** every file is hashed with streaming SHA-256 (custom C++
   module, GIL-released) and verified after transfer.
 - **Phone bridge:** an on-demand QR-code web server (HTTPS, self-signed)
-   lets any phone in the same Wi-Fi upload files / send text without
-   installing anything.
+  lets any phone in the same Wi-Fi upload files / send text without
+  installing anything.
 - **Folder sync:** one-way watchdog-driven live mirroring.
+- **Portability:** a single codebase runs on Windows and Linux; the only
+  native artefact is a small C++ library compiled per operating system.
 - **Stack:** Python 3.11, PyQt6, Zeroconf, cryptography, Flask, watchdog,
-  qrcode + a C++ native DLL for SHA-256.
+  qrcode + a custom C++ native library for streaming SHA-256
+  (`p2p_native.dll` on Windows, `libp2p_native.so` on Linux).
 
 ---
 
@@ -134,7 +138,7 @@ Comparison axis used in the thesis (one paragraph per row is enough).
 | --------------------------- | --------------------------------------- | -------------------------------------------- | --------------------------------- | ---------------------------------------------------------------------- |
 | **Privacy**                 | Files traverse third-party servers.     | Vendor-locked (Apple↔Apple / Google↔Google). | Files stored on org cloud.        | Bytes never leave the LAN.                                             |
 | **Internet required**       | Yes — slow uploads even for LAN peers.  | No, but vendor-locked.                       | Yes.                              | **No** — works on an air-gapped LAN.                                   |
-| **Cross-OS / cross-vendor** | Yes.                                    | No.                                          | Yes, with account.                | Windows + any phone with a browser; the protocol is OS-agnostic.       |
+| **Cross-OS / cross-vendor** | Yes.                                    | No.                                          | Yes, with account.                | Windows/Linux + any phone with a browser; the protocol is OS-agnostic. |
 | **Speed**                   | Capped by WAN uplink.                   | LAN.                                         | WAN.                              | **Full LAN throughput** (chunked TCP + GIL-released native hash).      |
 | **Setup**                   | Account, login, sometimes an installer. | Same vendor.                                 | IT-provisioned.                   | **Zero**: launch the exe and the peer is visible.                      |
 | **Phone interop**           | Phone app required.                     | Same-vendor only.                            | Phone app required.               | **QR code** — any browser, no install.                                 |
@@ -256,6 +260,82 @@ send_data / recv_frame`.
   name, not their IP.
 - **Error prevention**: PIN, accept dialog, fingerprint warning.
 
+### 5.7 The native C++ module — rationale, internals & integration
+
+The application embeds one hand-written native component:
+`native/p2p_native.cpp`, a dependency-free implementation of **SHA-256**
+(FIPS 180-4) exposed through a small, stable **C ABI**. It is compiled into
+a shared library (`p2p_native.dll` on Windows, `libp2p_native.so` on Linux)
+and loaded at runtime by `p2p_lan_share/native.py` through Python's
+`ctypes`. SHA-256 is the integrity primitive for every transfer, so this
+module sits squarely in the file-transfer hot loop.
+
+**Why a native module (thesis justification).**
+
+- **Language-interoperability showcase.** It demonstrates a clean
+  Python ↔ C/C++ boundary using `ctypes` and an opaque handle (`void*`),
+  i.e. a stable C ABI rather than a heavyweight binding generator — no
+  pybind11/Cython is required at call time. (`pybind11` is listed only as
+  an optional convenience.)
+- **Streaming (incremental) hashing.** The hasher is created once
+  (`p2p_sha256_new`), fed arbitrary chunks (`p2p_sha256_update`) and
+  finalised (`p2p_sha256_final`). This mirrors the transfer loop, which
+  hashes each 1 MiB chunk as it is read from / written to the socket, so a
+  50 GB file is verified incrementally without ever holding more than one
+  chunk in memory.
+- **GIL released during hashing.** `ctypes.CDLL` releases CPython's Global
+  Interpreter Lock for the duration of each native call. While one thread
+  crunches SHA-256 in C++, other Python threads keep doing socket I/O, so
+  concurrent transfers overlap CPU-bound hashing with I/O-bound networking.
+- **Zero dependencies, tiny footprint.** The implementation uses no STL and
+  no third-party crypto, so the resulting library is a few kilobytes, has
+  no transitive dependencies to bundle, and is easy to audit.
+- **Deterministic, standards-compliant correctness.** Because it is a
+  textbook FIPS 180-4 implementation, its output is verified **bit-for-bit
+  against Python's `hashlib`** in `tests/test_native.py`.
+
+**Public C ABI (the entire surface).**
+
+| Symbol               | Signature                              | Purpose                                  |
+| -------------------- | -------------------------------------- | ---------------------------------------- |
+| `p2p_sha256_new`     | `void* (void)`                         | Allocate + init a hasher; opaque handle. |
+| `p2p_sha256_update`  | `void (void*, const uint8_t*, size_t)` | Feed one chunk of data.                  |
+| `p2p_sha256_final`   | `void (void*, uint8_t[32])`            | Write the 32-byte digest.                |
+| `p2p_sha256_free`    | `void (void*)`                         | Release the hasher.                      |
+| `p2p_native_version` | `uint32_t (void)`                      | Load-probe / version (`0x00010000`).     |
+
+**Cross-platform compilation.** A single preprocessor macro selects the
+export attribute, so the _same_ source compiles on both toolchains:
+
+```cpp
+#if defined(_WIN32)
+#  define P2P_API extern "C" __declspec(dllexport)
+#else
+#  define P2P_API extern "C" __attribute__((visibility("default")))
+#endif
+```
+
+`native/build.py` chooses a compiler per OS — MSVC (`cl /LD /O2`) with a
+MinGW `g++` fallback on Windows, and `g++` / `clang++`
+(`-shared -fPIC -O2`) on Linux — then copies the artefact into the package
+directory so that both `python -m p2p_lan_share.main` and the PyInstaller
+bundle can find it.
+
+**The Python bridge (`native.py`).** `_load()` searches, in order, the
+package directory, then the sibling `native/` folder, then the bare library
+name, raising an actionable "build it first" `RuntimeError` if nothing
+loads. `argtypes` / `restype` are declared so `ctypes` marshals arguments
+safely; the `_NativeSha` wrapper offers `update()` / `hexdigest()` and
+guarantees the C handle is released — in `hexdigest()` and again via a
+`__del__` safety net — preventing both memory leaks and double-frees. A
+finalised hasher reused by mistake raises `RuntimeError` instead of
+corrupting memory.
+
+**Graceful degradation.** The library is a build artefact (git-ignored); if
+it is missing, `native.py` fails fast with a clear message, and the native
+test module **skips** rather than fails, keeping a fresh checkout green
+until `python native/build.py` has run.
+
 ---
 
 ## 6. Cases the application handles gracefully (robustness chapter)
@@ -273,7 +353,7 @@ send_data / recv_frame`.
 | 9   | Two peers share the same display name              | mDNS service name embeds the fingerprint; UI shows an impersonation warning.                                                                     |
 | 10  | Device renamed                                     | `peer_id` (cert fingerprint) is stable → mute list still applies; history keeps both names.                                                      |
 | 11  | App offline                                        | `_handle()` rejects offers with reason `"offline"`; sender's row shows "offline".                                                                |
-| 12  | QR uploads > 4 GB or too many files                 | Flask `MAX_CONTENT_LENGTH` returns HTTP 413; file-count limit returns a UI error.                                                                 |
+| 12  | QR uploads > 4 GB or too many files                | Flask `MAX_CONTENT_LENGTH` returns HTTP 413; file-count limit returns a UI error.                                                                |
 | 13  | Concurrent multi-recipient send                    | One task per recipient; each has its own row; semaphore caps to 3 simultaneous.                                                                  |
 | 14  | Crash recovery                                     | Settings, history, muted list are stored via atomic `*.tmp + replace`.                                                                           |
 | 15  | Storage JSON corrupted                             | `_read` returns the default and the app keeps running.                                                                                           |
@@ -289,30 +369,31 @@ send_data / recv_frame`.
 
 ### 7.1 Modules
 
-| File                    | Responsibility                                                                                  |
-| ----------------------- | ----------------------------------------------------------------------------------------------- |
-| `main.py`               | Entry point — creates QApplication, applies theme, shows MainWindow.                            |
-| `config.py`             | Constants (ports, chunk size, paths, app name).                                                 |
-| `util.py`               | Tiny pure helpers (`fmt_size`, `fmt_eta`, `unique_path`, `local_ip`).                           |
-| `crypto_utils.py`       | One-time generation of self-signed TLS cert + key.                                              |
-| `protocol.py`           | `Wire` framed reader/writer + TLS contexts + `open_offer` handshake helper.                     |
-| `discovery.py`          | `PeerRegistry` — mDNS advertise + browse, fingerprint-based identity, mute, heartbeat.          |
-| `network.py`            | `TransferServer` (accept loop, receiver), `TransferTask` (sender), `TransferQueue` (semaphore). |
-| `sync.py`               | `SyncSender` (initial scan + watchdog), `SyncReceiver` (event consumer, path-traversal guard).  |
-| `web_server.py`         | `QrWebServer` — Flask app + QR code generator.                                                  |
-| `storage.py`            | Atomic, thread-safe JSON persistence for settings, history, inbox, mute.                        |
-| `native.py`             | `ctypes` bridge to `p2p_native.dll` (streaming SHA-256).                                        |
-| `native/p2p_native.cpp` | Pure-C++ FIPS-180-4 SHA-256, exposed via C ABI.                                                 |
-| `gui/main_window.py`    | Composes services, routes signals, owns life-cycle.                                             |
-| `gui/tab_transfer.py`   | File-transfer tab (peer selector, file list, PIN, send, progress rows).                         |
-| `gui/tab_quicktext.py`  | Quick-text composer + inbox.                                                                    |
-| `gui/tab_tools.py`      | Folder sync + QR web server controls.                                                           |
-| `gui/tab_history.py`    | Persistent table view of past transfers.                                                        |
-| `gui/dialogs.py`        | Accept-offer, quick-text editor, quick-text reader.                                             |
-| `gui/peer_list.py`      | Reusable peer list widget.                                                                      |
-| `gui/_widgets.py`       | Generic atoms (`PeerSelector`, headings).                                                       |
-| `gui/theme.py`          | Light theme stylesheet + `ToggleSwitch`.                                                        |
-| `build_exe.py`          | PyInstaller build script that produces `dist/P2P LAN Share.exe`.                                |
+| File                    | Responsibility                                                                                     |
+| ----------------------- | -------------------------------------------------------------------------------------------------- |
+| `main.py`               | Entry point — creates QApplication, applies theme, shows MainWindow.                               |
+| `config.py`             | Constants (ports, chunk size, paths, app name).                                                    |
+| `util.py`               | Tiny pure helpers (`fmt_size`, `fmt_eta`, `unique_path`, `local_ip`).                              |
+| `crypto_utils.py`       | One-time generation of self-signed TLS cert + key.                                                 |
+| `protocol.py`           | `Wire` framed reader/writer + TLS contexts + `open_offer` handshake helper.                        |
+| `discovery.py`          | `PeerRegistry` — mDNS advertise + browse, fingerprint-based identity, mute, heartbeat.             |
+| `network.py`            | `TransferServer` (accept loop, receiver), `TransferTask` (sender), `TransferQueue` (semaphore).    |
+| `sync.py`               | `SyncSender` (initial scan + watchdog), `SyncReceiver` (event consumer, path-traversal guard).     |
+| `web_server.py`         | `QrWebServer` — Flask app + QR code generator.                                                     |
+| `storage.py`            | Atomic, thread-safe JSON persistence for settings, history, inbox, mute.                           |
+| `native.py`             | `ctypes` bridge to the native library (`p2p_native.dll` / `libp2p_native.so`) — streaming SHA-256. |
+| `native/p2p_native.cpp` | Pure-C++ FIPS-180-4 SHA-256, exposed via C ABI.                                                    |
+| `gui/main_window.py`    | Composes services, routes signals, owns life-cycle.                                                |
+| `gui/tab_transfer.py`   | File-transfer tab (peer selector, file list, PIN, send, progress rows).                            |
+| `gui/tab_quicktext.py`  | Quick-text composer + inbox.                                                                       |
+| `gui/tab_tools.py`      | Folder sync + QR web server controls.                                                              |
+| `gui/tab_history.py`    | Persistent table view of past transfers.                                                           |
+| `gui/dialogs.py`        | Accept-offer, quick-text editor, quick-text reader.                                                |
+| `gui/peer_list.py`      | Reusable peer list widget.                                                                         |
+| `gui/_widgets.py`       | Generic atoms (`PeerSelector`, headings).                                                          |
+| `gui/theme.py`          | Light theme stylesheet + `ToggleSwitch`.                                                           |
+| `native/build.py`       | Cross-platform native build (Windows `.dll` / Linux `.so`); copies the lib into the package.       |
+| `build.py`              | PyInstaller build (Windows `.exe` / Linux binary); builds the native lib first if it is missing.   |
 
 ### 7.2 Layers (top-down)
 
@@ -322,6 +403,41 @@ send_data / recv_frame`.
    `QrWebServer`, `PeerRegistry`.
 4. **Protocol** — `Wire`, frame types, JSON envelopes, TLS contexts.
 5. **Infrastructure** — `storage`, `crypto_utils`, `native`, OS sockets.
+
+### 7.3 Repository layout (after the cross-platform refactor)
+
+```
+ppp/                          # project root
+├─ build.py                   # PyInstaller build (Win .exe / Linux binary);
+│                             #   compiles the native lib first if it is missing
+├─ native/                    # C++ module — beside the package, not inside it
+│   ├─ p2p_native.cpp         #   FIPS 180-4 SHA-256, C ABI, cross-platform source
+│   └─ build.py               #   compiles -> p2p_native.dll / libp2p_native.so
+├─ p2p_lan_share/             # the importable application package
+│   ├─ main.py  config.py  util.py
+│   ├─ crypto_utils.py  protocol.py  discovery.py
+│   ├─ network.py  sync.py  web_server.py  storage.py
+│   ├─ native.py              #   ctypes bridge that loads the compiled library
+│   └─ gui/                   #   PyQt6 widgets, tabs, dialogs, theme
+├─ tests/                     # pytest suite mirroring the modules one-to-one
+├─ docs/
+│   └─ THESIS_REFERENCE.md    # this document
+└─ requirements.txt  pytest.ini  .gitignore
+```
+
+**Design notes.**
+
+- The C++ sources live in a top-level `native/` folder — _beside_ the
+  package — so the runtime module `native.py` and the native source folder
+  never collide, and the build tooling is easy to find.
+- The compiled library is **copied into** `p2p_lan_share/` at build time
+  (and git-ignored) so `native.py` finds it next to itself in every run
+  mode: from source, via `python -m`, or inside the frozen executable.
+- Two entry points, one per concern: `native/build.py` builds the C++
+  library; the root `build.py` packages the whole app (and invokes the
+  former automatically when the library is absent).
+- Documentation lives in `docs/` and is never shipped inside the
+  importable package.
 
 ---
 
@@ -429,9 +545,9 @@ Three nodes, one network.
         +---------------+
 ```
 
-Persistent files (per node, under `%APPDATA%\p2p_lan_share\`):
-`cert.pem`, `key.pem`, `settings.json`, `history.json`,
-`quicktexts.json`, `muted.json`.
+Persistent files (per node, under `%APPDATA%\p2p_lan_share\` on Windows or
+`~/p2p_lan_share/` on Linux): `cert.pem`, `key.pem`, `settings.json`,
+`history.json`, `quicktexts.json`, `muted.json`.
 
 ### 8.4 Component Diagram (logical)
 
@@ -651,46 +767,126 @@ Sequence per kind:
 
 ---
 
-## 10. Build & deployment (for the implementation chapter)
+## 10. Testing strategy & coverage (for the testing / validation chapter)
 
-- Built with **PyInstaller** via `build_exe.py`.
-- `--onefile --windowed`, bundles `p2p_native.dll` into the package
-  resource directory so `native.py::_load()` finds it via
+A `pytest` suite under `tests/` mirrors the source modules one-to-one
+(`test_<module>.py`). It is engineered to run **without a display, without
+a real LAN, and without ever touching the developer's real user data** —
+so it is fast, deterministic and CI-friendly.
+
+### 10.1 Test isolation (`conftest.py`)
+
+Before the package is imported, `conftest.py` redirects all persistent
+storage to a throw-away temporary directory by overriding the `APPDATA`,
+`USERPROFILE` and `HOME` environment variables. Because `config.py`
+resolves its data and download folders **at import time**, this guarantees
+that no test reads or writes the real `%APPDATA%\p2p_lan_share\`. The same
+file makes the package importable from either layout and exposes small
+shared fixtures (e.g. `tmp_download_dir`, `free_tcp_port`).
+
+### 10.2 How the networked parts are tested without a network
+
+- **Wire / protocol** — a `socket.socketpair()` provides two connected
+  in-process endpoints, so the framing layer is exercised end-to-end with
+  no TLS and no ports.
+- **Transfers** — real **loopback TLS** on an ephemeral port (patched into
+  `config.TCP_PORT`) using the generated self-signed certificate. Qt
+  signals are connected with `DirectConnection` because the tests run
+  without a Qt event loop.
+- **Folder sync** — each side receives one end of a `socketpair` wrapped in
+  a `Wire`; the path-traversal guard is called directly.
+- **QR web server** — Flask's **test client** drives the HTTP routes, so no
+  socket bind or QR image rendering is needed.
+
+### 10.3 What each suite proves
+
+| Test file              | Focus                        | Representative guarantees                                                                                                                                                                           |
+| ---------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test_native.py`       | **C++ SHA-256 correctness**  | Empty, single-chunk, multi-chunk and 4 MB+ inputs match `hashlib` bit-for-bit; finalising twice raises. Skips cleanly if the library is not built.                                                  |
+| `test_protocol.py`     | Wire framing + TLS contexts  | JSON/data round-trips; oversized frame rejected; wrong frame type raises; closed socket → `ConnectionError`; **concurrent writers never interleave** a frame; server/client SSL contexts behave.    |
+| `test_network.py`      | Transfer engine (end-to-end) | `FileSpec` / `IncomingOffer` logic; idempotent cancel; **file integrity** (bytes received == bytes sent over TLS); text transfer; offline / muted / rejected offers; queue concurrency cap.         |
+| `test_sync.py`         | Folder sync + security       | **Path-traversal** (`../`, absolute, backslash) is neutralised; initial scan mirrors files into the destination; delete events remove files; `_rel` uses forward slashes.                           |
+| `test_web_server.py`   | QR phone bridge              | Token gate (404 on a bad token); upload saves the file and emits a signal; "no files" / "too many files" guards; **unique-filename** collision handling; text endpoint truncates to the char limit. |
+| `test_crypto_utils.py` | TLS identity                 | Certificate + key are generated once and are **idempotent** on the second call; a valid X.509 with the expected subject; the key is RSA ≥ 2048 bits.                                                |
+| `test_discovery.py`    | Peer registry                | Display string (🟢 / 🔴 / 🔇); **fingerprint id is stable** (16 hex chars); mute toggle; device-name fallback when empty; find-by-name.                                                             |
+| `test_storage.py`      | Persistence                  | Defaults when the file is missing; partial-file merge; **corrupt JSON falls back** to defaults; thread-safe concurrent append; muted list saved sorted; **atomic write** leaves no `.tmp` behind.   |
+| `test_util.py`         | Pure helpers                 | `fmt_size` / `fmt_eta` formatting across unit boundaries; `unique_path` numbering; `local_ip` returns a syntactically valid IPv4.                                                                   |
+
+### 10.4 Markers & execution
+
+`pytest.ini` registers two markers — `integration` (tests that bind real
+sockets / use TLS) and `slow` — and points collection at `tests/`. Typical
+invocations from the project root:
+
+```
+python -m pytest                      # the whole suite
+python -m pytest -m integration       # only the end-to-end TLS transfers
+python -m pytest tests/test_native.py # a single module
+```
+
+### 10.5 Coverage philosophy
+
+Tests target **behaviour and contracts**, not implementation details: the
+correctness of the hash, the integrity of transfers, the security guards
+(path-traversal, token gate, mute / offline), persistence durability, and
+protocol framing under concurrency. GUI widgets are deliberately **not**
+unit-tested — they are thin and signal-driven, and the logic they trigger
+is already covered on the service side. Two filesystem/timing-sensitive
+tests (`test_storage`'s threaded append and one `test_sync` round-trip) can
+flake on Windows when an antivirus or the search indexer transiently locks
+a file mid-`os.replace`; they pass in isolation and are environmental, not
+logic, failures.
+
+---
+
+## 11. Build & deployment (for the implementation chapter)
+
+- Built with **PyInstaller** via `build.py` (Windows & Linux).
+- The native library is compiled first by `native/build.py`
+  (Windows `p2p_native.dll`, Linux `libp2p_native.so`) and copied into the
+  package resource directory so `native.py::_load()` finds it via
   `Path(__file__).parent`.
-- Output: `dist/P2P LAN Share.exe` (~68 MB), self-contained, no installer
+- `--onefile --windowed`. Output: `dist/P2P LAN Share.exe` on Windows
+  (~68 MB) or `dist/P2P LAN Share` on Linux; self-contained, no installer
   required, no admin rights needed.
-- Persistent user data lives in `%APPDATA%\p2p_lan_share\`.
+- Run from source without packaging: `python -m p2p_lan_share.main`
+  (after `python native/build.py`).
+- Persistent user data lives in `%APPDATA%\p2p_lan_share\` on Windows and
+  `~/p2p_lan_share/` on Linux.
 - Required firewall rules: TCP 51821 (transfer), TCP 51822 (QR web HTTPS),
   UDP 5353 (mDNS) — Windows prompts on first run.
 
 ---
 
-## 11. Suggested thesis outline (so the agent knows where each section lands)
+## 12. Suggested thesis outline (so the agent knows where each section lands)
 
 1. **Introduction** — Problem, motivation, contributions, structure.
    _Use §1, §3._
-2. **Theoretical background** — P2P, mDNS, TLS, hashing, Qt threading.
-   _Use §5._
+2. **Theoretical background** — P2P, mDNS, TLS, hashing, Qt threading,
+   native (C++) integration. _Use §5 (incl. §5.7)._
 3. **State of the art** — Comparison table.
    _Use §3._
 4. **Requirements analysis** — Functional + non-functional (security,
    performance, UX). _Use §2 + §4._
-5. **Architecture & design** — Layers, modules, patterns, diagrams.
-   _Use §5, §7, §8.1–§8.4._
+5. **Architecture & design** — Layers, modules, repository layout,
+   patterns, diagrams. _Use §5, §7, §8.1–§8.4._
 6. **Implementation** — Wire protocol, transfer FSM, cancellation,
-   progress, sync, QR. _Use §2, §6, §8.5–§8.8, §9._
+   progress, sync, QR, native SHA-256 module.
+   _Use §2, §5.7, §6, §8.5–§8.8, §9._
 7. **Robustness & security** — _Use §5.4 + §6._
-8. **Deployment & user manual** — _Use §10 + screenshots._
-9. **Evaluation** — LAN throughput, vs alternatives (qualitative table
-   §3), UX heuristics walk-through (§4).
-10. **Conclusions & future work** — multi-platform binary, file
-    resumption, group chat, end-to-end pinning, mobile app.
-11. **Appendices** — Protocol cheat sheet (§9), data model (§8.9), build
-    instructions (§10).
+8. **Testing & validation** — Isolation strategy, networkless testing,
+   what each suite proves, markers. _Use §10._
+9. **Deployment & user manual** — _Use §11 + screenshots._
+10. **Evaluation** — LAN throughput, vs alternatives (qualitative table
+    §3), UX heuristics walk-through (§4).
+11. **Conclusions & future work** — file resumption, group chat,
+    end-to-end pinning, dedicated mobile app.
+12. **Appendices** — Protocol cheat sheet (§9), data model (§8.9), build
+    instructions (§11).
 
 ---
 
-## 12. Glossary (drop-in)
+## 13. Glossary (drop-in)
 
 - **mDNS / Zeroconf / Bonjour** — Multicast-DNS service discovery on the
   LAN without a central server.

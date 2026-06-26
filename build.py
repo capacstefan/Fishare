@@ -1,16 +1,24 @@
-"""Build a standalone Windows executable using PyInstaller.
+"""Build a standalone executable using PyInstaller (Windows & Linux).
 
 Run from the project root:
 
-    py build_exe.py
+    python build.py
 
-Produces `dist/P2P LAN Share.exe`. The executable is a single file,
-windowed (no console), and bundles the native DLL, PyQt6, zeroconf,
-cryptography and all other runtime dependencies. It can be copied to
-another Windows machine and launched without installing Python.
+Produces a single-file, windowed application:
+
+    Windows -> dist/P2P LAN Share.exe
+    Linux   -> dist/P2P LAN Share
+
+The bundle includes the native library, PyQt6, zeroconf, cryptography and
+all other runtime dependencies, so it can be copied to another machine and
+launched without installing Python.
+
+If the native library is not already present in the package, it is built
+first by invoking ``native/build.py``.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -19,10 +27,11 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent
 PKG_DIR = ROOT_DIR / "p2p_lan_share"
 PKG_NAME = PKG_DIR.name  # "p2p_lan_share"
+NATIVE_BUILD = ROOT_DIR / "native" / "build.py"
 APP_NAME = "P2P LAN Share"
 
 ENTRY_SCRIPT = ROOT_DIR / "_pyinstaller_entry.py"
-DLL_NAME = "p2p_native.dll"
+LIB_NAME = "p2p_native.dll" if sys.platform == "win32" else "libp2p_native.so"
 
 
 def ensure_pyinstaller() -> None:
@@ -33,6 +42,18 @@ def ensure_pyinstaller() -> None:
         pass
     print(">> Installing PyInstaller...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pyinstaller"])
+
+
+def ensure_native() -> bool:
+    """Build the native library via native/build.py if it is missing."""
+    if (PKG_DIR / LIB_NAME).exists():
+        return True
+    print(f">> {LIB_NAME} not found — building it via native/build.py ...")
+    subprocess.call([sys.executable, str(NATIVE_BUILD)])
+    if (PKG_DIR / LIB_NAME).exists():
+        return True
+    print(f"!! Failed to build {LIB_NAME}. See the messages above.")
+    return False
 
 
 def write_entry_script() -> None:
@@ -55,14 +76,7 @@ def clean() -> None:
 
 
 def build() -> int:
-    dll = PKG_DIR / DLL_NAME
-    if not dll.exists():
-        print(
-            f"!! {DLL_NAME} not found in {PKG_DIR}. "
-            "Build it first: py p2p_lan_share/native/build.py"
-        )
-        return 1
-
+    lib = PKG_DIR / LIB_NAME
     args = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
@@ -71,8 +85,9 @@ def build() -> int:
         "--windowed",
         "--name", APP_NAME,
         "--paths", str(ROOT_DIR),
-        # Place the DLL inside the bundled package dir so native.py finds it.
-        "--add-binary", f"{dll}{';'}{PKG_NAME}",
+        # Place the library inside the bundled package dir so native.py finds it.
+        # os.pathsep is ';' on Windows and ':' on Linux.
+        "--add-binary", f"{lib}{os.pathsep}{PKG_NAME}",
         "--collect-submodules", PKG_NAME,
         "--collect-submodules", "zeroconf",
         "--collect-submodules", "cryptography",
@@ -85,6 +100,8 @@ def build() -> int:
 
 def main() -> int:
     ensure_pyinstaller()
+    if not ensure_native():
+        return 1
     write_entry_script()
     clean()
     try:
@@ -95,8 +112,8 @@ def main() -> int:
         except OSError:
             pass
     if rc == 0:
-        out = ROOT_DIR / "dist" / f"{APP_NAME}.exe"
-        print(f"\n[OK] Built: {out}")
+        exe = APP_NAME + (".exe" if sys.platform == "win32" else "")
+        print(f"\n[OK] Built: {ROOT_DIR / 'dist' / exe}")
     else:
         print("\n[FAIL] PyInstaller returned", rc)
     return rc
