@@ -5,6 +5,14 @@ import socket
 from pathlib import Path
 
 
+def asset_path(name: str) -> Path:
+    """Absolute path to a bundled asset under the package's ``assets`` folder.
+
+    Resolves correctly both from source and from a PyInstaller bundle.
+    """
+    return Path(__file__).resolve().parent / "assets" / name
+
+
 def fmt_size(n: float | int) -> str:
     n = float(n)
     for unit in ("B", "KB", "MB", "GB"):

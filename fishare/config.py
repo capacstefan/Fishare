@@ -5,11 +5,11 @@ import os
 import socket
 from pathlib import Path
 
-APP_NAME = "P2P LAN Share"
-APP_ID = "p2p_lan_share"
+APP_NAME = "Fishare"
+APP_ID = "fishare"
 
 # Network
-SERVICE_TYPE = "_p2planshare._tcp.local."
+SERVICE_TYPE = "_fishare._tcp.local."
 TCP_PORT = 51821
 WEB_PORT = 51822
 MAX_CONCURRENT_TRANSFERS = 3

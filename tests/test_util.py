@@ -1,9 +1,9 @@
-"""Tests for p2p_lan_share.util — pure helpers, no I/O dependencies."""
+"""Tests for fishare.util — pure helpers, no I/O dependencies."""
 from __future__ import annotations
 
 from pathlib import Path
 
-from p2p_lan_share.util import fmt_size, fmt_eta, unique_path, local_ip
+from fishare.util import fmt_size, fmt_eta, unique_path, local_ip
 
 
 class TestFmtSize:

@@ -12,9 +12,10 @@ from pathlib import Path
 import pytest
 from PyQt6.QtCore import Qt
 
-from p2p_lan_share import config, network
-from p2p_lan_share.network import (
+from fishare import config, network
+from fishare.network import (
     FileSpec, IncomingOffer, TransferQueue, TransferServer, TransferTask,
+    exceeds_file_size_limit,
 )
 
 # Server-side signals fire from receiver threads. Without a Qt event loop,
@@ -30,6 +31,28 @@ class TestFileSpec:
     def test_name_property_strips_dir(self):
         s = FileSpec(path="C:/tmp/folder/test.bin", size=10)
         assert s.name == "test.bin"
+
+
+class TestFileSizeLimit:
+    def test_single_file_within_limit(self, monkeypatch):
+        monkeypatch.setattr(config, "MAX_FILE_SIZE", 100)
+        assert exceeds_file_size_limit([50]) is False
+
+    def test_single_file_over_limit(self, monkeypatch):
+        monkeypatch.setattr(config, "MAX_FILE_SIZE", 100)
+        assert exceeds_file_size_limit([101]) is True
+
+    def test_batch_total_over_limit(self, monkeypatch):
+        monkeypatch.setattr(config, "MAX_FILE_SIZE", 100)
+        assert exceeds_file_size_limit([60, 60]) is True
+
+    def test_declared_total_over_limit(self, monkeypatch):
+        monkeypatch.setattr(config, "MAX_FILE_SIZE", 100)
+        assert exceeds_file_size_limit([10, 10], declared_total=101) is True
+
+    def test_empty_batch(self, monkeypatch):
+        monkeypatch.setattr(config, "MAX_FILE_SIZE", 100)
+        assert exceeds_file_size_limit([]) is False
 
 
 class TestIncomingOffer:
@@ -193,6 +216,29 @@ class TestEndToEndTransfer:
         task.finished.connect(lambda *a: finished.append(a))
         task.run()
         assert finished and finished[0][1] is False
+
+    def test_oversized_batch_rejected(self, transfer_server, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "MAX_FILE_SIZE", 100)
+        srv, _state, port, _dl = transfer_server
+
+        f1 = tmp_path / "a.bin"
+        f2 = tmp_path / "b.bin"
+        f1.write_bytes(b"a" * 60)
+        f2.write_bytes(b"b" * 60)
+
+        task = TransferTask(
+            peer_name="loop", peer_addr="127.0.0.1", peer_port=port,
+            kind="files", from_name="Tester", from_id="abc",
+            files=[
+                FileSpec(path=str(f1), size=60),
+                FileSpec(path=str(f2), size=60),
+            ],
+        )
+        finished = []
+        task.finished.connect(lambda *a: finished.append(a))
+        task.run()
+        assert finished and finished[0][1] is False
+        assert "too large" in finished[0][2].lower()
 
 
 # -------------------------------------------------------------------------

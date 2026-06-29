@@ -6,7 +6,7 @@ import hashlib
 import pytest
 
 try:
-    from p2p_lan_share import native
+    from fishare import native
     _HAVE_NATIVE = True
     _NATIVE_ERR = None
 except Exception as e:  # pragma: no cover

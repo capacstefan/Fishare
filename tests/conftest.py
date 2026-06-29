@@ -3,9 +3,9 @@ Shared pytest configuration.
 
 This file:
   * Redirects the application's persistent storage (settings, history, cert,
-    download dir) to an isolated temp directory BEFORE the p2p_lan_share
+    download dir) to an isolated temp directory BEFORE the fishare
     package is imported, so tests never touch your real user data.
-  * Makes the `p2p_lan_share` package importable whether the tests/ folder
+  * Makes the `fishare` package importable whether the tests/ folder
     lives inside the package (current layout) or beside it (recommended
     layout next to your venv / requirements.txt).
   * Provides a couple of small fixtures used by several test modules.
@@ -34,8 +34,8 @@ os.environ["HOME"] = str(_TEST_ROOT / "home")
 (_TEST_ROOT / "home").mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# Step 2: make the p2p_lan_share package importable.
-# Layout A (current):  <workspace>/p2p_lan_share/tests/conftest.py
+# Step 2: make the fishare package importable.
+# Layout A (current):  <workspace>/fishare/tests/conftest.py
 #                       -> parent of package = workspace's parent
 # Layout B (moved):    <project_root>/tests/conftest.py
 #                       -> parent of package = project_root
@@ -48,7 +48,7 @@ for cand in (_HERE.parent.parent, _HERE.parent):
         sys.path.insert(0, s)
 
 # Sanity import: if this fails, tests can't run.
-import p2p_lan_share  # noqa: E402,F401
+import fishare  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +73,7 @@ def free_tcp_port() -> int:
 @pytest.fixture(autouse=True)
 def _clean_storage_files():
     """Make sure every test starts with empty persistent storage files."""
-    from p2p_lan_share import config  # noqa: WPS433
+    from fishare import config  # noqa: WPS433
     for p in (config.SETTINGS_FILE, config.HISTORY_FILE,
               config.QUICKTEXTS_FILE, config.MUTED_FILE):
         try:

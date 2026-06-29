@@ -1,10 +1,10 @@
-"""Tests for p2p_lan_share.storage — atomic JSON persistence."""
+"""Tests for fishare.storage — atomic JSON persistence."""
 from __future__ import annotations
 
 import json
 import threading
 
-from p2p_lan_share import config, storage
+from fishare import config, storage
 
 
 class TestSettings:

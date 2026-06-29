@@ -4,15 +4,17 @@ from __future__ import annotations
 import datetime as _dt
 from pathlib import Path
 
-from PyQt6.QtCore import pyqtSlot
+from PyQt6.QtCore import Qt, pyqtSlot
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
-    QFileDialog, QMainWindow, QMessageBox, QStatusBar, QTabWidget,
+    QFileDialog, QLabel, QMainWindow, QMessageBox, QStatusBar, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
 from .. import config, storage
 from ..discovery import PeerRegistry
 from ..network import FileSpec, TransferQueue, TransferServer, TransferTask, connect_and_offer
+from ..util import asset_path, fmt_size
 from ..sync import SyncReceiver, SyncSender
 from ..web_server import QrWebServer
 from .dialogs import AcceptOfferDialog
@@ -64,6 +66,7 @@ class MainWindow(QMainWindow):
             (self.tab_history, "History"),
         ):
             self.tabs.addTab(w, label)
+        self._install_logo()
         layout.addWidget(self.tabs, 1)
 
         self.setCentralWidget(central)
@@ -80,6 +83,16 @@ class MainWindow(QMainWindow):
     # =================================================================
     # Setup helpers
     # =================================================================
+    def _install_logo(self) -> None:
+        """Show the app logo at the right end of the tab bar row."""
+        pix = QPixmap(str(asset_path("logo.png")))
+        if pix.isNull():
+            return
+        logo = QLabel()
+        logo.setPixmap(pix.scaledToHeight(48, Qt.TransformationMode.SmoothTransformation))
+        logo.setContentsMargins(0, 0, 12, 0)
+        self.tabs.setCornerWidget(logo, Qt.Corner.TopRightCorner)
+
     def _wire_signals(self) -> None:
         r, s = self.registry, self.server
         tt, tx, tl = self.tab_transfer, self.tab_text, self.tab_tools
@@ -222,6 +235,13 @@ class MainWindow(QMainWindow):
             return
 
         total = sum(s.size for s in specs)
+        if total > config.MAX_FILE_SIZE:
+            QMessageBox.warning(
+                self, "Transfer too large",
+                f"Selected files total {fmt_size(total)}, which exceeds the "
+                f"{config.MAX_FILE_SIZE // (1024**3)} GB limit.",
+            )
+            return
         offline, sent = [], 0
         for name in peer_names:
             peer = self.registry.find_by_name(name)

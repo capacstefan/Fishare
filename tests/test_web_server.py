@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from p2p_lan_share import config
-from p2p_lan_share.web_server import QrWebServer
+from fishare import config
+from fishare.web_server import QrWebServer
 
 
 @pytest.fixture

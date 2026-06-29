@@ -6,8 +6,8 @@ Run from the project root:
 
 Produces a single-file, windowed application:
 
-    Windows -> dist/P2P LAN Share.exe
-    Linux   -> dist/P2P LAN Share
+    Windows -> dist/Fishare.exe
+    Linux   -> dist/Fishare
 
 The bundle includes the native library, PyQt6, zeroconf, cryptography and
 all other runtime dependencies, so it can be copied to another machine and
@@ -25,13 +25,15 @@ import sys
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
-PKG_DIR = ROOT_DIR / "p2p_lan_share"
-PKG_NAME = PKG_DIR.name  # "p2p_lan_share"
+PKG_DIR = ROOT_DIR / "fishare"
+PKG_NAME = PKG_DIR.name  # "fishare"
 NATIVE_BUILD = ROOT_DIR / "native" / "build.py"
-APP_NAME = "P2P LAN Share"
+APP_NAME = "Fishare"
 
 ENTRY_SCRIPT = ROOT_DIR / "_pyinstaller_entry.py"
 LIB_NAME = "p2p_native.dll" if sys.platform == "win32" else "libp2p_native.so"
+ICON_PNG = PKG_DIR / "assets" / "logo.png"
+ICON_ICO = PKG_DIR / "assets" / "logo.ico"
 
 
 def ensure_pyinstaller() -> None:
@@ -56,6 +58,38 @@ def ensure_native() -> bool:
     return False
 
 
+def ensure_icon() -> str | None:
+    """Return an icon path for PyInstaller's --icon, building an .ico if needed.
+
+    On Windows a multi-size ``.ico`` is generated from ``logo.png`` via Pillow
+    so the produced .exe carries the app logo. Falls back to the PNG (or None)
+    if conversion is unavailable.
+    """
+    if not ICON_PNG.exists():
+        return None
+    if sys.platform != "win32":
+        return str(ICON_PNG)
+    try:
+        from PIL import Image
+    except ImportError:
+        print("!! Pillow not found — the .exe will use the default icon.")
+        return None
+    try:
+        img = Image.open(ICON_PNG).convert("RGBA")
+        # Pad to a centered, transparent square so Windows renders the icon
+        # crisply at every size (icons are expected to be square).
+        side = max(img.size)
+        square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        square.paste(img, ((side - img.width) // 2, (side - img.height) // 2))
+        sizes = [(16, 16), (24, 24), (32, 32), (48, 48),
+                 (64, 64), (128, 128), (256, 256)]
+        square.save(ICON_ICO, format="ICO", sizes=sizes)
+        return str(ICON_ICO)
+    except Exception as exc:  # pragma: no cover - best-effort icon
+        print(f"!! Could not build .ico ({exc}); using default icon.")
+        return None
+
+
 def write_entry_script() -> None:
     ENTRY_SCRIPT.write_text(
         "import sys\n"
@@ -77,6 +111,7 @@ def clean() -> None:
 
 def build() -> int:
     lib = PKG_DIR / LIB_NAME
+    icon = ensure_icon()
     args = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
@@ -88,12 +123,16 @@ def build() -> int:
         # Place the library inside the bundled package dir so native.py finds it.
         # os.pathsep is ';' on Windows and ':' on Linux.
         "--add-binary", f"{lib}{os.pathsep}{PKG_NAME}",
+        # Bundle the logo (and any other assets) next to the package.
+        "--add-data", f"{PKG_DIR / 'assets'}{os.pathsep}{PKG_NAME}/assets",
         "--collect-submodules", PKG_NAME,
         "--collect-submodules", "zeroconf",
         "--collect-submodules", "cryptography",
         "--hidden-import", "PyQt6.sip",
-        str(ENTRY_SCRIPT),
     ]
+    if icon:
+        args += ["--icon", icon]
+    args.append(str(ENTRY_SCRIPT))
     print(">>", " ".join(args))
     return subprocess.call(args, cwd=str(ROOT_DIR))
 

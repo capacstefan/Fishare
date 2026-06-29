@@ -1,4 +1,4 @@
-# P2P LAN Share — Thesis Reference Document
+# Fishare — Thesis Reference Document
 
 > Purpose: Single source of truth for writing a bachelor-degree paper about
 > the application. It captures **what the app does**, **why it is built that
@@ -12,7 +12,7 @@
 
 ## 1. Executive Summary
 
-**P2P LAN Share** is a cross-platform (Windows and Linux) desktop
+**Fishare** is a cross-platform (Windows and Linux) desktop
 application for _zero-configuration_ peer-to-peer file, text and folder
 sharing inside a local network. It
 replaces ad-hoc workflows such as e-mailing files to yourself, plugging in
@@ -44,7 +44,7 @@ Use this list as the master checklist of "what the application can do".
 
 ### 2.1 Identity & Discovery
 
-1. Automatic mDNS advertisement (`_p2planshare._tcp.local.`).
+1. Automatic mDNS advertisement (`_fishare._tcp.local.`).
 2. Stable per-device identifier = SHA-256 fingerprint (first 16 hex) of the
    local TLS certificate — survives rename and IP change.
 3. Live list of peers with online/offline indicator (🟢 / 🔴).
@@ -134,7 +134,7 @@ failed / cancelled / offline`).
 
 Comparison axis used in the thesis (one paragraph per row is enough).
 
-| Concern                     | Cloud (Drive, Dropbox, WeTransfer)      | Phone tools (AirDrop, Nearby Share)          | Enterprise (SharePoint, OneDrive) | **P2P LAN Share**                                                      |
+| Concern                     | Cloud (Drive, Dropbox, WeTransfer)      | Phone tools (AirDrop, Nearby Share)          | Enterprise (SharePoint, OneDrive) | **Fishare**                                                            |
 | --------------------------- | --------------------------------------- | -------------------------------------------- | --------------------------------- | ---------------------------------------------------------------------- |
 | **Privacy**                 | Files traverse third-party servers.     | Vendor-locked (Apple↔Apple / Google↔Google). | Files stored on org cloud.        | Bytes never leave the LAN.                                             |
 | **Internet required**       | Yes — slow uploads even for LAN peers.  | No, but vendor-locked.                       | Yes.                              | **No** — works on an air-gapped LAN.                                   |
@@ -266,7 +266,7 @@ The application embeds one hand-written native component:
 `native/p2p_native.cpp`, a dependency-free implementation of **SHA-256**
 (FIPS 180-4) exposed through a small, stable **C ABI**. It is compiled into
 a shared library (`p2p_native.dll` on Windows, `libp2p_native.so` on Linux)
-and loaded at runtime by `p2p_lan_share/native.py` through Python's
+and loaded at runtime by `fishare/native.py` through Python's
 `ctypes`. SHA-256 is the integrity primitive for every transfer, so this
 module sits squarely in the file-transfer hot loop.
 
@@ -318,7 +318,7 @@ export attribute, so the _same_ source compiles on both toolchains:
 `native/build.py` chooses a compiler per OS — MSVC (`cl /LD /O2`) with a
 MinGW `g++` fallback on Windows, and `g++` / `clang++`
 (`-shared -fPIC -O2`) on Linux — then copies the artefact into the package
-directory so that both `python -m p2p_lan_share.main` and the PyInstaller
+directory so that both `python -m fishare.main` and the PyInstaller
 bundle can find it.
 
 **The Python bridge (`native.py`).** `_load()` searches, in order, the
@@ -413,7 +413,7 @@ ppp/                          # project root
 ├─ native/                    # C++ module — beside the package, not inside it
 │   ├─ p2p_native.cpp         #   FIPS 180-4 SHA-256, C ABI, cross-platform source
 │   └─ build.py               #   compiles -> p2p_native.dll / libp2p_native.so
-├─ p2p_lan_share/             # the importable application package
+├─ fishare/                   # the importable application package
 │   ├─ main.py  config.py  util.py
 │   ├─ crypto_utils.py  protocol.py  discovery.py
 │   ├─ network.py  sync.py  web_server.py  storage.py
@@ -430,7 +430,7 @@ ppp/                          # project root
 - The C++ sources live in a top-level `native/` folder — _beside_ the
   package — so the runtime module `native.py` and the native source folder
   never collide, and the build tooling is easy to find.
-- The compiled library is **copied into** `p2p_lan_share/` at build time
+- The compiled library is **copied into** `fishare/` at build time
   (and git-ignored) so `native.py` finds it next to itself in every run
   mode: from source, via `python -m`, or inside the frozen executable.
 - Two entry points, one per concern: `native/build.py` builds the C++
@@ -531,7 +531,7 @@ Three nodes, one network.
 ```
    +-------------------------+    LAN / Wi-Fi    +-------------------------+
    |  PC A  (Windows 64-bit) |<================>|  PC B  (Windows 64-bit) |
-   |  P2P LAN Share.exe      |                  |  P2P LAN Share.exe      |
+   |  Fishare.exe            |                  |  Fishare.exe            |
    |   - PyQt6 GUI           |  TCP 51821 (TLS) |   - PyQt6 GUI           |
    |   - mDNS service        |  UDP 5353 (mDNS) |   - mDNS service        |
    |   - p2p_native.dll      |                  |   - p2p_native.dll      |
@@ -545,8 +545,8 @@ Three nodes, one network.
         +---------------+
 ```
 
-Persistent files (per node, under `%APPDATA%\p2p_lan_share\` on Windows or
-`~/p2p_lan_share/` on Linux): `cert.pem`, `key.pem`, `settings.json`,
+Persistent files (per node, under `%APPDATA%\fishare\` on Windows or
+`~/fishare/` on Linux): `cert.pem`, `key.pem`, `settings.json`,
 `history.json`, `quicktexts.json`, `muted.json`.
 
 ### 8.4 Component Diagram (logical)
@@ -780,7 +780,7 @@ Before the package is imported, `conftest.py` redirects all persistent
 storage to a throw-away temporary directory by overriding the `APPDATA`,
 `USERPROFILE` and `HOME` environment variables. Because `config.py`
 resolves its data and download folders **at import time**, this guarantees
-that no test reads or writes the real `%APPDATA%\p2p_lan_share\`. The same
+that no test reads or writes the real `%APPDATA%\fishare\`. The same
 file makes the package importable from either layout and exposes small
 shared fixtures (e.g. `tmp_download_dir`, `free_tcp_port`).
 
@@ -846,13 +846,13 @@ logic, failures.
   (Windows `p2p_native.dll`, Linux `libp2p_native.so`) and copied into the
   package resource directory so `native.py::_load()` finds it via
   `Path(__file__).parent`.
-- `--onefile --windowed`. Output: `dist/P2P LAN Share.exe` on Windows
-  (~68 MB) or `dist/P2P LAN Share` on Linux; self-contained, no installer
+- `--onefile --windowed`. Output: `dist/Fishare.exe` on Windows
+  (~68 MB) or `dist/Fishare` on Linux; self-contained, no installer
   required, no admin rights needed.
-- Run from source without packaging: `python -m p2p_lan_share.main`
+- Run from source without packaging: `python -m fishare.main`
   (after `python native/build.py`).
-- Persistent user data lives in `%APPDATA%\p2p_lan_share\` on Windows and
-  `~/p2p_lan_share/` on Linux.
+- Persistent user data lives in `%APPDATA%\fishare\` on Windows and
+  `~/fishare/` on Linux.
 - Required firewall rules: TCP 51821 (transfer), TCP 51822 (QR web HTTPS),
   UDP 5353 (mDNS) — Windows prompts on first run.
 

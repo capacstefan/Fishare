@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from p2p_lan_share import sync
-from p2p_lan_share.protocol import Wire
-from p2p_lan_share.sync import SyncReceiver, SyncSender
+from fishare import sync
+from fishare.protocol import Wire
+from fishare.sync import SyncReceiver, SyncSender
 
 
 def _wire_pair() -> tuple[Wire, Wire]:

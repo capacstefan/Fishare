@@ -40,6 +40,19 @@ class FileSpec:
         return os.path.basename(self.path)
 
 
+def exceeds_file_size_limit(
+    sizes: list[int], *, declared_total: int | None = None,
+) -> bool:
+    """True if any file or the batch total exceeds MAX_FILE_SIZE."""
+    if any(s > config.MAX_FILE_SIZE for s in sizes):
+        return True
+    if sum(sizes) > config.MAX_FILE_SIZE:
+        return True
+    if declared_total is not None and declared_total > config.MAX_FILE_SIZE:
+        return True
+    return False
+
+
 @dataclass
 class IncomingOffer:
     kind: str
@@ -171,10 +184,8 @@ class TransferServer(QObject):
 
             files = msg.get("files", []) or []
             total = int(msg.get("total_size", 0))
-            if kind == "files" and (
-                total > config.MAX_FILE_SIZE
-                or any(int(f.get("size", 0)) > config.MAX_FILE_SIZE for f in files)
-            ):
+            sizes = [int(f.get("size", 0)) for f in files]
+            if kind == "files" and exceeds_file_size_limit(sizes, declared_total=total):
                 wire.send_json({"type": "response", "accept": False, "reason": "too large"})
                 return
 

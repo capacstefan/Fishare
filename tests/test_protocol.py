@@ -10,8 +10,8 @@ import threading
 
 import pytest
 
-from p2p_lan_share import protocol
-from p2p_lan_share.protocol import (
+from fishare import protocol
+from fishare.protocol import (
     FT_DATA, FT_JSON, MAX_FRAME, Wire, WireError,
 )
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
-from p2p_lan_share import config, crypto_utils
+from fishare import config, crypto_utils
 
 
 class TestEnsureCert:

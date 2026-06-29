@@ -3,9 +3,9 @@
     Windows -> p2p_native.dll    (MSVC, falling back to MinGW g++)
     Linux   -> libp2p_native.so  (g++, falling back to clang++)
 
-The compiled library is copied into the ``p2p_lan_share`` package so that
-both ``python -m p2p_lan_share.main`` and the PyInstaller bundle can load it
-through ``p2p_lan_share/native.py``.
+The compiled library is copied into the ``fishare`` package so that
+both ``python -m fishare.main`` and the PyInstaller bundle can load it
+through ``fishare/native.py``.
 
 Run from anywhere in the project:
 
@@ -21,7 +21,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent          # <root>/native
 SRC = HERE / "p2p_native.cpp"
-PKG = HERE.parent / "p2p_lan_share"             # <root>/p2p_lan_share
+PKG = HERE.parent / "fishare"                   # <root>/fishare
 
 LIB_NAME = "p2p_native.dll" if sys.platform == "win32" else "libp2p_native.so"
 LIB = HERE / LIB_NAME

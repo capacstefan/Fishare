@@ -1,7 +1,7 @@
 """Tests for discovery.PeerRegistry — logic only, no real mDNS network."""
 from __future__ import annotations
 
-from p2p_lan_share.discovery import Peer, PeerRegistry, _peer_id
+from fishare.discovery import Peer, PeerRegistry, _peer_id
 
 
 class TestPeer:

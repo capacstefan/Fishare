@@ -18,11 +18,14 @@ dist/
 
 # PyInstaller / app packaging
 _pyinstaller_entry.py
-P2P LAN Share.spec
+Fishare.spec
+
+# Generated app icon (built from logo.png at build time)
+fishare/assets/logo.ico
 
 # Native build artifacts (the compiled library is copied into the package)
-p2p_lan_share/p2p_native.dll
-p2p_lan_share/libp2p_native.so
+fishare/p2p_native.dll
+fishare/libp2p_native.so
 native/p2p_native.dll
 native/libp2p_native.so
 native/*.obj
