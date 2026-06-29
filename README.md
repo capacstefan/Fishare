@@ -6,13 +6,13 @@ mDNS and transfer over TLS at full LAN speed. Runs on **Windows and Linux**.
 
 ## Features
 
-- **Auto-discovery** of peers on the LAN (mDNS / Zeroconf).
-- **File transfer** over TLS 1.3 with streaming SHA-256 integrity checks.
-- **Quick text** messaging between peers.
-- **One-way folder sync** with live mirroring (watchdog).
-- **QR phone bridge**: a phone in the same Wi-Fi uploads files / text from a
+- *Auto-discovery* of peers on the LAN (mDNS / Zeroconf).
+- *File transfer* over TLS 1.3 with streaming SHA-256 integrity checks.
+- *Quick text* messaging between peers.
+- *One-way folder sync* with live mirroring (watchdog).
+- *QR phone bridge*: a phone in the same Wi-Fi uploads files / text from a
   browser, no app install.
-- **Security**: self-signed TLS, fingerprint-based identity, optional PIN,
+- *Security*: self-signed TLS, fingerprint-based identity, optional PIN,
   per-peer mute, path-traversal protection.
 
 ## Requirements
@@ -23,11 +23,17 @@ mDNS and transfer over TLS at full LAN speed. Runs on **Windows and Linux**.
     C++") or MinGW-w64 `g++`.
   - Linux: `g++` or `clang++` (`sudo apt install build-essential`).
 
+
+## CLONE
+```bash
+git clone https://gitlab.dev.info.uvt.ro/didactic/2026/licenta/ir/licentastefancapac2026
+cd  licentastefancapac2026/lucrare
+
 ## Quick start (run from source)
 
 
 ```bash
-# 1. Create and activate a virtual environment
+# Create and activate a virtual environment
 python -m venv .venv
 # Windows (Command Prompt):
 .venv\Scripts\activate
@@ -36,18 +42,17 @@ python -m venv .venv
 # Linux:
 source .venv/bin/activate
 
-# 2. Install dependencies
+# Install dependencies
 pip install -r requirements.txt
 
-# 3. Build the native library (once)
+# Build the native library
 python native/build.py
 
-# 4. Run the app
+# Run the app
 python -m fishare.main
 ```
 
-Step 3 compiles `p2p_native.dll` (Windows) or `libp2p_native.so` (Linux) and
-copies it into the package. The app will not start without it.
+Step 3 is to compile `p2p_native.dll` on Windows or `libp2p_native.so` for Linux.
 
 ## Building the native module
 
@@ -58,8 +63,7 @@ source and inside the packaged executable:
 python native/build.py
 ```
 
-It auto-selects a compiler per OS (MSVC -> MinGW on Windows; g++ -> clang++ on
-Linux) and copies the result into `fishare/`.
+It auto-selects a compiler (based on OS) and copies the result into `fishare/`.
 
 ## Building a standalone executable
 
@@ -67,24 +71,23 @@ Linux) and copies the result into `fishare/`.
 python build.py
 ```
 
-Produces a single self-contained file (no installer, no Python required on
-the target machine):
+Produces a single executable file by compiling the native library first if it is missing, then bundles
+everything with PyInstaller.
+
 
 - Windows -> `dist/P2P LAN Share.exe`
 - Linux -> `dist/P2P LAN Share`
 
-`build.py` compiles the native library first if it is missing, then bundles
-everything with PyInstaller.
 
 ## Testing
 
 ```bash
-python -m pytest                      # full suite (87 tests)
+python -m pytest                      # full suite (93 tests)
 python -m pytest -m integration       # only end-to-end TLS transfers
 python -m pytest tests/test_native.py # a single module
 ```
 
-**Expected result:** all tests pass. The suite is isolated — it redirects
+**Expected result:** all tests should pass. The suite is isolated — it redirects
 app data to a temp folder and uses in-process sockets / Flask's test client,
 so it never touches your real settings or binds public ports.
 
@@ -129,7 +132,6 @@ requirements.txt pytest.ini
 ## Networking & data
 
 - **Ports:** TCP 51821 (transfer), TCP 51822 (QR web), UDP 5353 (mDNS).
-  Allow these through the firewall (Windows prompts on first run).
-- **User data:** `%APPDATA%\fishare\` (Windows) or `~/fishare/`
-  (Linux) — holds the TLS cert/key, settings, history, quick-texts and mute
+  Allow these through the firewall if the Windows prompts it
+- **User data:** `%APPDATA%\fishare\` (Windows) or `~/fishare/` (Linux) — holds the TLS cert/key, settings, history, quick-texts and mute
   list.
