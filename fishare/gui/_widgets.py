@@ -83,7 +83,7 @@ class PeerSelector(QWidget):
     def _on_pick(self, item: QListWidgetItem) -> None:
         pid = PeerList.pid_of(item)
         name = PeerList.name_of(item)
-        # Toggle: already selected → remove; else → add.
+        # Toggle: already selected -> remove; else -> add.
         for i in range(self.selected.count()):
             if self.selected.item(i).data(Qt.ItemDataRole.UserRole) == pid:
                 self.selected.takeItem(i)

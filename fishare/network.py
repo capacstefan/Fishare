@@ -1,7 +1,7 @@
 """TLS file/text transfer: server, sender task, outbound queue.
 
 Wire protocol (after offer/response accept):
-    files: file_begin → N data frames → file_end(sha256) → ... → all_done
+    files: file_begin -> N data frames -> file_end(sha256) -> ... -> all_done
     text:  text_body
     sync:  Wire is handed to sync.py
 """

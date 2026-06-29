@@ -33,7 +33,7 @@ class ToolsTab(QWidget):
         gb = QGroupBox("One-Way Folder Sync")
         v = QVBoxLayout(gb); v.setContentsMargins(20, 26, 20, 18); v.setSpacing(12)
 
-        v.addWidget(muted("Sender → Receiver. Changes mirror automatically."))
+        v.addWidget(muted("Sender -> Receiver. Changes mirror automatically."))
         v.addWidget(muted("Pick one peer"))
 
         self.peer_list = PeerList()

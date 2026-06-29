@@ -25,11 +25,14 @@ mDNS and transfer over TLS at full LAN speed. Runs on **Windows and Linux**.
 
 ## Quick start (run from source)
 
+
 ```bash
 # 1. Create and activate a virtual environment
 python -m venv .venv
-# Windows:
+# Windows (Command Prompt):
 .venv\Scripts\activate
+# Windows (PowerShell):
+.venv\Scripts\Activate.ps1
 # Linux:
 source .venv/bin/activate
 
@@ -55,7 +58,7 @@ source and inside the packaged executable:
 python native/build.py
 ```
 
-It auto-selects a compiler per OS (MSVC → MinGW on Windows; g++ → clang++ on
+It auto-selects a compiler per OS (MSVC -> MinGW on Windows; g++ -> clang++ on
 Linux) and copies the result into `fishare/`.
 
 ## Building a standalone executable
@@ -67,8 +70,8 @@ python build.py
 Produces a single self-contained file (no installer, no Python required on
 the target machine):
 
-- Windows → `dist/P2P LAN Share.exe`
-- Linux → `dist/P2P LAN Share`
+- Windows -> `dist/P2P LAN Share.exe`
+- Linux -> `dist/P2P LAN Share`
 
 `build.py` compiles the native library first if it is missing, then bundles
 everything with PyInstaller.
